@@ -5,6 +5,8 @@ import { CoreApiController } from './core-api.controller';
 import { CoreApiService } from './core-api.service';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
+import { TriggersModule } from './triggers/triggers.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -12,6 +14,8 @@ import { UsersModule } from './users/users.module';
     DatabaseModule,
     UsersModule,
     AuthModule,
+    TriggersModule,
+    NotificationsModule,
   ],
   controllers: [CoreApiController],
   providers: [CoreApiService],
