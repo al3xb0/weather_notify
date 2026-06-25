@@ -1,10 +1,21 @@
 import { Module } from '@nestjs/common';
-import { WatcherController } from './watcher.controller';
+import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
+import { HttpModule } from '@nestjs/axios';
+import { DatabaseModule } from '@app/database';
+import { RedisModule } from '@app/common';
 import { WatcherService } from './watcher.service';
+import { WeatherService } from './weather/weather.service';
+import { RabbitPublisherService } from './messaging/rabbit-publisher.service';
 
 @Module({
-  imports: [],
-  controllers: [WatcherController],
-  providers: [WatcherService],
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    ScheduleModule.forRoot(),
+    HttpModule,
+    DatabaseModule,
+    RedisModule,
+  ],
+  providers: [WatcherService, WeatherService, RabbitPublisherService],
 })
 export class WatcherModule {}
