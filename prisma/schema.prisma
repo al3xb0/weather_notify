@@ -1,0 +1,116 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Metric {
+  TEMPERATURE
+  APPARENT_TEMP
+  WIND_SPEED
+  PRECIPITATION
+  HUMIDITY
+  SEVERE
+}
+
+enum Operator {
+  GT
+  GTE
+  LT
+  LTE
+  EQ
+}
+
+enum Channel {
+  TELEGRAM
+  EMAIL
+  WEB_PUSH
+}
+
+enum TriggerState {
+  ARMED
+  FIRED
+}
+
+enum NotifStatus {
+  SENT
+  FAILED
+}
+
+model User {
+  id               String             @id @default(uuid())
+  email            String             @unique
+  passwordHash     String
+  telegramChatId   String?
+  telegramLinkToken String?           @unique
+  triggers         Trigger[]
+  pushSubs         PushSubscription[]
+  notifications    Notification[]
+  refreshTokens    RefreshToken[]
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+}
+
+model Trigger {
+  id          String       @id @default(uuid())
+  userId      String
+  name        String
+  city        String
+  latitude    Float
+  longitude   Float
+  metric      Metric
+  operator    Operator
+  threshold   Float
+  channels    Channel[]
+  cooldownMin Int          @default(60)
+  isActive    Boolean      @default(true)
+  state       TriggerState @default(ARMED)
+  lastFiredAt DateTime?
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([isActive, latitude, longitude])
+  @@index([userId])
+}
+
+model Notification {
+  id        String      @id @default(uuid())
+  triggerId String
+  userId    String
+  channel   Channel
+  status    NotifStatus
+  payload   Json
+  error     String?
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
