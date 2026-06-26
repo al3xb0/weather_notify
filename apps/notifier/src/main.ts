@@ -1,8 +1,10 @@
 import { NestFactory } from '@nestjs/core';
+import { Logger } from '@nestjs/common';
 import { NotifierModule } from './notifier.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(NotifierModule);
-  await app.listen(process.env.port ?? 3000);
+  // Worker process: consumes RabbitMQ, no HTTP server.
+  await NestFactory.createApplicationContext(NotifierModule);
+  new Logger('Notifier').log('Notifier service started');
 }
 bootstrap();

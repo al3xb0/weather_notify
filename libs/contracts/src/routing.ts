@@ -18,4 +18,9 @@ export function queueNameFor(channel: Channel): string {
   return `notifications.${CHANNEL_ROUTING[channel]}`;
 }
 
+/** Routing key used to dead-letter a failed message onto the retry queue. */
+export function retryRoutingKeyFor(channel: Channel): string {
+  return `${CHANNEL_ROUTING[channel]}.retry`;
+}
+
 export const DLX_EXCHANGE = 'notifications.dlx';
