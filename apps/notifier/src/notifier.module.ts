@@ -9,7 +9,11 @@ import { EmailChannel } from './channels/email.channel';
 import { WebPushChannel } from './channels/webpush.channel';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), HttpModule, DatabaseModule],
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    HttpModule,
+    DatabaseModule,
+  ],
   providers: [
     NotifierService,
     RabbitConsumerService,

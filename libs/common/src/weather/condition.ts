@@ -41,7 +41,11 @@ function metricValue(snapshot: WeatherSnapshot, metric: Metric): number {
   }
 }
 
-function compare(value: number, operator: Operator, threshold: number): boolean {
+function compare(
+  value: number,
+  operator: Operator,
+  threshold: number,
+): boolean {
   switch (operator) {
     case Operator.GT:
       return value > threshold;
@@ -70,5 +74,8 @@ export function evaluateCondition(
     };
   }
   const observedValue = metricValue(snapshot, metric);
-  return { matched: compare(observedValue, operator, threshold), observedValue };
+  return {
+    matched: compare(observedValue, operator, threshold),
+    observedValue,
+  };
 }

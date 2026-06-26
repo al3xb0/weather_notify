@@ -10,7 +10,7 @@ async function bootstrap() {
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.enableCors({
-    origin: config.get('CORS_ORIGIN') ?? true,
+    origin: config.get<string>('CORS_ORIGIN') ?? true,
     credentials: true,
   });
 
@@ -23,6 +23,6 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document);
 
-  await app.listen(config.get('CORE_API_PORT') ?? 3000);
+  await app.listen(config.get<number>('CORE_API_PORT') ?? 3000);
 }
-bootstrap();
+void bootstrap();

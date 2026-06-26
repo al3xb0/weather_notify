@@ -4,10 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { Trigger, TriggerState } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { evaluateCondition, WeatherSnapshot } from '@app/common';
-import {
-  routingKeyFor,
-  TriggerFiredEvent,
-} from '@app/contracts';
+import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
 import { WeatherService } from './weather/weather.service';
 import { RabbitPublisherService } from './messaging/rabbit-publisher.service';
 

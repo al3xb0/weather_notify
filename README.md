@@ -1,98 +1,95 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Weather Notify — Event-Driven Alerting System (Backend)
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Microservice backend that lets users define **weather triggers** (custom thresholds or
+severe-weather alerts for a city) and delivers notifications over **Telegram, Email and
+Web Push**. Built as a NestJS monorepo with an asynchronous, message-driven core.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+> Frontend lives in a separate repository: `weather_notify_web` (Next.js).
 
-## Description
+## Architecture
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
-
-```bash
-$ npm install
+```mermaid
+flowchart LR
+    UI[Next.js UI] -->|REST + JWT| API[core-api]
+    API -->|Prisma| PG[(PostgreSQL)]
+    WATCH[watcher · @Cron] -->|read active triggers| PG
+    WATCH -->|cache hit/miss| REDIS[(Redis)]
+    WATCH -->|HTTP| OM[Open-Meteo API]
+    WATCH -->|publish trigger.fired| MQ{{RabbitMQ · topic exchange}}
+    MQ -->|telegram.fired| NOTIF[notifier]
+    MQ -->|email.fired| NOTIF
+    MQ -->|push.fired| NOTIF
+    NOTIF --> TG[Telegram]
+    NOTIF --> MAIL[Resend Email]
+    NOTIF --> WP[Web Push]
+    NOTIF -->|log SENT/FAILED| PG
 ```
 
-## Compile and run the project
+### Why asynchronous / microservices?
+
+- **Decoupling & resilience** — the watcher never blocks on slow notification delivery.
+  It emits an event and moves on; the notifier consumes at its own pace.
+- **Independent scaling** — polling, delivery and the API scale separately.
+- **Reliable delivery** — RabbitMQ gives at-least-once delivery with a dead-letter
+  retry topology, so transient failures (a flaky Telegram/SMTP call) are retried with
+  backoff instead of being lost.
+
+## Services
+
+| Service | Role |
+|---------|------|
+| **core-api** | REST API: JWT auth, triggers CRUD, user/Telegram/push management, notifications history, Swagger |
+| **watcher** | `@Cron` job: groups active triggers by location, polls Open-Meteo (Redis-cached), evaluates conditions, publishes `trigger.fired` |
+| **notifier** | Consumes per-channel queues, delivers via Telegram/Email/Web Push with retry/DLQ, persists every outcome |
+
+Shared code lives in `libs/`: `database` (Prisma), `contracts` (event DTOs, routing keys,
+enums), `common` (`evaluateCondition`, Redis).
+
+## Tech stack
+
+Node 22 · TypeScript · NestJS 11 · Prisma 6 + PostgreSQL · RabbitMQ ·
+Redis · Passport/JWT · Open-Meteo · Resend · web-push · Docker Compose · GitHub Actions.
+
+## Anti-spam design
+
+Each trigger has a state machine (`ARMED` → `FIRED`) plus a per-trigger `cooldownMin`.
+A trigger fires when the condition first becomes true (ARMED) and re-fires only after the
+cooldown elapses; when the condition clears it re-arms (hysteresis). This prevents a
+sustained condition (e.g. "temperature > 30°C") from emitting an alert every cycle.
+
+## Getting started
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+cp .env.example .env          # fill in channel secrets (optional for local dev)
+docker compose up -d          # postgres, redis, rabbitmq + all three services
 ```
 
-## Run tests
+Local development (services on the host, infra in Docker):
 
 ```bash
-# unit tests
-$ npm run test
+docker compose up -d postgres redis rabbitmq
+npm install
+npm run db:migrate            # apply migrations
+npm run start:core-api        # + start:watcher / start:notifier in separate shells
+```
 
-# e2e tests
-$ npm run test:e2e
+- Swagger UI: <http://localhost:3000/docs>
+- RabbitMQ management UI: <http://localhost:15672> (weather / weather)
 
-# test coverage
-$ npm run test:cov
+## Testing
+
+```bash
+npm test          # unit tests (condition evaluation, ...)
+npm run test:e2e  # auth + triggers CRUD against a real Postgres
 ```
 
 ## Deployment
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+The stack runs 24/7 for free on an **Oracle Cloud Always Free** ARM VM via
+`docker compose up -d` (no cold starts). All three images are produced from a single
+parameterized `Dockerfile` (`APP` arg).
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Security
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Public repo: only `.env.example` is committed. All secrets (DB, JWT, bot token, Resend,
+VAPID) are provided via environment variables.

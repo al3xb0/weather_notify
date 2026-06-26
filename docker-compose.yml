@@ -45,5 +45,68 @@ services:
       timeout: 10s
       retries: 5
 
+  core-api:
+    build:
+      context: .
+      args:
+        APP: core-api
+    container_name: wn_core_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+    command: sh -c "npx prisma migrate deploy && node dist/apps/core-api/main"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  watcher:
+    build:
+      context: .
+      args:
+        APP: watcher
+    container_name: wn_watcher
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+    depends_on:
+      core-api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  notifier:
+    build:
+      context: .
+      args:
+        APP: notifier
+    container_name: wn_notifier
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
 volumes:
   pgdata:

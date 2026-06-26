@@ -37,10 +37,7 @@ export class RabbitPublisherService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async publish(
-    routingKey: string,
-    message: TriggerFiredEvent,
-  ): Promise<void> {
+  async publish(routingKey: string, message: TriggerFiredEvent): Promise<void> {
     await this.channel.publish(NOTIFICATIONS_EXCHANGE, routingKey, message, {
       persistent: true,
       messageId: message.eventId,

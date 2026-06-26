@@ -101,7 +101,7 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
 
     let event: TriggerFiredEvent;
     try {
-      event = JSON.parse(msg.content.toString());
+      event = JSON.parse(msg.content.toString()) as TriggerFiredEvent;
     } catch {
       this.channelWrapper.ack(msg); // unparseable — drop it
       return;

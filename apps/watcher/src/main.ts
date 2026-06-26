@@ -7,4 +7,4 @@ async function bootstrap() {
   await NestFactory.createApplicationContext(WatcherModule);
   new Logger('Watcher').log('Watcher service started');
 }
-bootstrap();
+void bootstrap();

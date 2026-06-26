@@ -20,7 +20,8 @@ export class WebPushChannel implements NotificationChannel {
   ) {
     const publicKey = config.get<string>('VAPID_PUBLIC_KEY') ?? '';
     const privateKey = config.get<string>('VAPID_PRIVATE_KEY') ?? '';
-    const subject = config.get<string>('VAPID_SUBJECT') ?? 'mailto:admin@example.com';
+    const subject =
+      config.get<string>('VAPID_SUBJECT') ?? 'mailto:admin@example.com';
     this.configured = Boolean(publicKey && privateKey);
     if (this.configured) {
       webpush.setVapidDetails(subject, publicKey, privateKey);
@@ -47,7 +48,10 @@ export class WebPushChannel implements NotificationChannel {
     for (const sub of subs) {
       try {
         await webpush.sendNotification(
-          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          {
+            endpoint: sub.endpoint,
+            keys: { p256dh: sub.p256dh, auth: sub.auth },
+          },
           payload,
         );
         delivered++;
@@ -64,7 +68,9 @@ export class WebPushChannel implements NotificationChannel {
     }
 
     if (delivered === 0) {
-      throw new PermanentNotificationError('All push subscriptions are invalid');
+      throw new PermanentNotificationError(
+        'All push subscriptions are invalid',
+      );
     }
   }
 }

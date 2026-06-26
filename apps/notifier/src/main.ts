@@ -7,4 +7,4 @@ async function bootstrap() {
   await NestFactory.createApplicationContext(NotifierModule);
   new Logger('Notifier').log('Notifier service started');
 }
-bootstrap();
+void bootstrap();

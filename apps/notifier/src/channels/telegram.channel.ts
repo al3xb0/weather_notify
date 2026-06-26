@@ -34,13 +34,10 @@ export class TelegramChannel implements NotificationChannel {
     }
 
     await firstValueFrom(
-      this.http.post(
-        `https://api.telegram.org/bot${this.token}/sendMessage`,
-        {
-          chat_id: user.telegramChatId,
-          text: `🌦️ ${alertText(event)}`,
-        },
-      ),
+      this.http.post(`https://api.telegram.org/bot${this.token}/sendMessage`, {
+        chat_id: user.telegramChatId,
+        text: `🌦️ ${alertText(event)}`,
+      }),
     );
   }
 }
