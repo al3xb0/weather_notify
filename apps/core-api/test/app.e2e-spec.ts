@@ -95,7 +95,6 @@ describe('Auth flow (e2e)', () => {
     expect(res.body.refreshToken).toBeDefined();
     expect(res.body.refreshToken).not.toBe(refreshToken);
 
-    // Old token must no longer work (rotation).
     await request(app.getHttpServer())
       .post('/auth/refresh')
       .send({ refreshToken })
