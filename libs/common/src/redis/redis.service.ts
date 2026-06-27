@@ -1,6 +1,10 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
+
+const RELEASE_IF_OWNED =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
 
 @Injectable()
 export class RedisService implements OnModuleDestroy {
@@ -21,10 +25,21 @@ export class RedisService implements OnModuleDestroy {
     await this.client.set(key, JSON.stringify(value), 'EX', ttlSec);
   }
 
-  /** Atomic "claim once": returns true only the first time within the TTL. */
-  async claim(key: string, ttlSec: number): Promise<boolean> {
-    const res = await this.client.set(key, '1', 'EX', ttlSec, 'NX');
-    return res === 'OK';
+  /**
+   * Acquire a fenced lock: returns a unique token when the key was free, else
+   * null. The token must be passed back to releaseLock so a slow holder cannot
+   * delete a lock another instance has since acquired.
+   */
+  async acquireLock(key: string, ttlSec: number): Promise<string | null> {
+    const token = randomUUID();
+    const res = await this.client.set(key, token, 'EX', ttlSec, 'NX');
+    return res === 'OK' ? token : null;
+  }
+
+  /** Release a lock only while we still own it (compare-and-delete via Lua). */
+  async releaseLock(key: string, token: string): Promise<boolean> {
+    const res = (await this.client.eval(RELEASE_IF_OWNED, 1, key, token)) as number;
+    return res === 1;
   }
 
   onModuleDestroy(): void {

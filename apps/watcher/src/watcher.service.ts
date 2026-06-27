@@ -28,15 +28,23 @@ export class WatcherService {
   })
   async runCycle(): Promise<void> {
     // Distributed lock so a slow cycle never overlaps with the next tick.
-    const acquired = await this.redis.claim(CYCLE_LOCK_KEY, CYCLE_LOCK_TTL_SEC);
-    if (!acquired) {
+    const token = await this.redis.acquireLock(
+      CYCLE_LOCK_KEY,
+      CYCLE_LOCK_TTL_SEC,
+    );
+    if (!token) {
       this.logger.warn('Previous cycle still running — skipping this tick');
       return;
     }
     try {
       await this.poll();
     } finally {
-      await this.redis.client.del(CYCLE_LOCK_KEY);
+      const released = await this.redis.releaseLock(CYCLE_LOCK_KEY, token);
+      if (!released) {
+        this.logger.warn(
+          'Cycle lock expired before release — cycle exceeded its TTL',
+        );
+      }
     }
   }
 
