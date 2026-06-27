@@ -1,8 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
+import cookieParser from 'cookie-parser';
 import { CoreApiModule } from './../src/core-api.module';
 import { PrismaService } from '@app/database';
+
+function refreshCookie(res: request.Response): string {
+  const header = res.headers['set-cookie'] as unknown as string[] | undefined;
+  const rt = header?.find((c) => c.startsWith('rt='));
+  return rt ? rt.split(';')[0].slice('rt='.length) : '';
+}
 
 describe('Auth flow (e2e)', () => {
   let app: INestApplication;
@@ -20,6 +27,7 @@ describe('Auth flow (e2e)', () => {
     app.useGlobalPipes(
       new ValidationPipe({ whitelist: true, transform: true }),
     );
+    app.use(cookieParser());
     prisma = app.get(PrismaService);
     await app.init();
   });
@@ -39,9 +47,10 @@ describe('Auth flow (e2e)', () => {
       .expect(201);
 
     expect(res.body.accessToken).toBeDefined();
-    expect(res.body.refreshToken).toBeDefined();
+    expect(res.body.refreshToken).toBeUndefined();
     accessToken = res.body.accessToken;
-    refreshToken = res.body.refreshToken;
+    refreshToken = refreshCookie(res);
+    expect(refreshToken).not.toBe('');
   });
 
   it('rejects duplicate registration with 409', () => {
@@ -90,14 +99,16 @@ describe('Auth flow (e2e)', () => {
   it('rotates the refresh token and revokes the old one', async () => {
     const res = await request(app.getHttpServer())
       .post('/auth/refresh')
-      .send({ refreshToken })
+      .set('Cookie', `rt=${refreshToken}`)
       .expect(200);
-    expect(res.body.refreshToken).toBeDefined();
-    expect(res.body.refreshToken).not.toBe(refreshToken);
+    const rotated = refreshCookie(res);
+    expect(res.body.accessToken).toBeDefined();
+    expect(rotated).not.toBe('');
+    expect(rotated).not.toBe(refreshToken);
 
     await request(app.getHttpServer())
       .post('/auth/refresh')
-      .send({ refreshToken })
+      .set('Cookie', `rt=${refreshToken}`)
       .expect(401);
   });
 });

@@ -22,7 +22,7 @@ export class AuthService {
   private readonly accessSecret: string;
   private readonly accessTtlMs: number;
   private readonly refreshSecret: string;
-  private readonly refreshTtlMs: number;
+  readonly refreshTtlMs: number;
 
   constructor(
     private readonly prisma: PrismaService,
