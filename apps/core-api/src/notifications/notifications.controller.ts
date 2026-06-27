@@ -1,4 +1,11 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { NotificationsService } from './notifications.service';
 import { PaginationDto } from '../common/dto/pagination.dto';
@@ -16,5 +23,15 @@ export class NotificationsController {
   @Get()
   findAll(@CurrentUser() user: AuthUser, @Query() query: PaginationDto) {
     return this.notifications.findAll(user.userId, query);
+  }
+
+  @Delete()
+  clear(@CurrentUser() user: AuthUser) {
+    return this.notifications.clear(user.userId);
+  }
+
+  @Delete(':id')
+  remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.notifications.remove(user.userId, id);
   }
 }

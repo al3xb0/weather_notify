@@ -22,4 +22,16 @@ export class NotificationsService {
     ]);
     return { items, total, page, limit };
   }
+
+  async remove(userId: string, id: string): Promise<{ id: string }> {
+    await this.prisma.notification.deleteMany({ where: { id, userId } });
+    return { id };
+  }
+
+  async clear(userId: string): Promise<{ count: number }> {
+    const { count } = await this.prisma.notification.deleteMany({
+      where: { userId },
+    });
+    return { count };
+  }
 }
