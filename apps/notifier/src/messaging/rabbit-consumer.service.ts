@@ -121,11 +121,11 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
     event: TriggerFiredEvent,
     err: unknown,
   ): Promise<void> {
-    const attempts = this.deathCount(msg);
+    const thisAttempt = this.attemptCount(msg) + 1;
     const message = err instanceof Error ? err.message : String(err);
     const permanent = err instanceof PermanentNotificationError;
 
-    if (permanent || attempts >= this.maxAttempts) {
+    if (permanent || thisAttempt >= this.maxAttempts) {
       await this.notifier.log(channel, event, NotifStatus.FAILED, message);
       this.channelWrapper.ack(msg);
       this.logger.warn(
@@ -134,18 +134,27 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Reject without requeue → DLX → retry queue (delayed redelivery).
-    this.channelWrapper.nack(msg, false, false);
+    // Republish onto the retry queue ourselves with an explicit attempt count,
+    // then ack the original. x-death is unreliable across main↔retry bounces.
+    await this.channelWrapper.publish(
+      DLX_EXCHANGE,
+      retryRoutingKeyFor(channel),
+      msg.content,
+      {
+        persistent: true,
+        contentType: 'application/json',
+        messageId: msg.properties.messageId,
+        headers: { 'x-attempts': thisAttempt },
+      },
+    );
+    this.channelWrapper.ack(msg);
     this.logger.warn(
-      `${channel} retry ${attempts + 1}/${this.maxAttempts} for ${event.eventId}: ${message}`,
+      `${channel} retry ${thisAttempt}/${this.maxAttempts} for ${event.eventId}: ${message}`,
     );
   }
 
-  private deathCount(msg: ConsumeMessage): number {
-    const xDeath = msg.properties.headers?.['x-death'] as
-      | Array<{ count?: number }>
-      | undefined;
-    return Array.isArray(xDeath) ? Number(xDeath[0]?.count ?? 0) : 0;
+  private attemptCount(msg: ConsumeMessage): number {
+    return Number(msg.properties.headers?.['x-attempts'] ?? 0);
   }
 
   async onModuleDestroy(): Promise<void> {
