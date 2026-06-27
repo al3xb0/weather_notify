@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '@app/database';
 import { PushSubscription, User } from '@prisma/client';
@@ -86,10 +90,17 @@ export class UsersService {
     return this.prisma.pushSubscription.findMany({ where: { userId } });
   }
 
-  addPushSubscription(
+  async addPushSubscription(
     userId: string,
     dto: CreatePushSubscriptionDto,
   ): Promise<PushSubscription> {
+    const existing = await this.prisma.pushSubscription.findUnique({
+      where: { endpoint: dto.endpoint },
+    });
+    // Never reassign an endpoint that already belongs to another user.
+    if (existing && existing.userId !== userId) {
+      throw new ForbiddenException('Endpoint already registered');
+    }
     return this.prisma.pushSubscription.upsert({
       where: { endpoint: dto.endpoint },
       create: {
@@ -98,7 +109,7 @@ export class UsersService {
         p256dh: dto.keys.p256dh,
         auth: dto.keys.auth,
       },
-      update: { p256dh: dto.keys.p256dh, auth: dto.keys.auth, userId },
+      update: { p256dh: dto.keys.p256dh, auth: dto.keys.auth },
     });
   }
 
