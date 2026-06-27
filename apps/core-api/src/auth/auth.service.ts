@@ -20,9 +20,9 @@ const BCRYPT_ROUNDS = 12;
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly accessSecret: string;
-  private readonly accessTtl: string;
+  private readonly accessTtlMs: number;
   private readonly refreshSecret: string;
-  private readonly refreshTtl: string;
+  private readonly refreshTtlMs: number;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -31,9 +31,10 @@ export class AuthService {
     config: ConfigService,
   ) {
     this.accessSecret = config.getOrThrow<string>('JWT_ACCESS_SECRET');
-    this.accessTtl = config.get<string>('JWT_ACCESS_TTL') ?? '15m';
     this.refreshSecret = config.getOrThrow<string>('JWT_REFRESH_SECRET');
-    this.refreshTtl = config.get<string>('JWT_REFRESH_TTL') ?? '7d';
+    // Parse at boot so a malformed TTL fails fast instead of silently widening.
+    this.accessTtlMs = parseDurationMs(config.get<string>('JWT_ACCESS_TTL') ?? '15m');
+    this.refreshTtlMs = parseDurationMs(config.get<string>('JWT_REFRESH_TTL') ?? '7d');
   }
 
   async register(dto: RegisterDto): Promise<Tokens> {
@@ -114,11 +115,11 @@ export class AuthService {
       { sub: userId, email },
       {
         secret: this.accessSecret,
-        expiresIn: Math.floor(parseDurationMs(this.accessTtl) / 1000),
+        expiresIn: Math.floor(this.accessTtlMs / 1000),
       },
     );
 
-    const refreshMs = parseDurationMs(this.refreshTtl);
+    const refreshMs = this.refreshTtlMs;
     const row = await this.prisma.refreshToken.create({
       data: {
         userId,
@@ -147,7 +148,9 @@ export class AuthService {
 function parseDurationMs(value: string): number {
   const match = /^(\d+)([smhd])$/.exec(value.trim());
   if (!match) {
-    return 7 * 24 * 60 * 60 * 1000;
+    throw new Error(
+      `Invalid JWT duration "${value}" — expected a value like "15m" or "7d"`,
+    );
   }
   const amount = Number(match[1]);
   const unit = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]]!;
