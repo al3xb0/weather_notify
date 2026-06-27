@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import { RedisService, WeatherSnapshot } from '@app/common';
-import { OpenMeteoResponse } from './open-meteo.types';
+import { openMeteoResponseSchema } from './open-meteo.types';
 
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 const CURRENT_FIELDS =
@@ -42,11 +42,11 @@ export class WeatherService {
 
   private async fetch(lat: number, lon: number): Promise<WeatherSnapshot> {
     const { data } = await firstValueFrom(
-      this.http.get<OpenMeteoResponse>(OPEN_METEO_URL, {
+      this.http.get(OPEN_METEO_URL, {
         params: { latitude: lat, longitude: lon, current: CURRENT_FIELDS },
       }),
     );
-    const c = data.current;
+    const c = openMeteoResponseSchema.parse(data).current;
     return {
       temperature: c.temperature_2m,
       apparentTemp: c.apparent_temperature,
