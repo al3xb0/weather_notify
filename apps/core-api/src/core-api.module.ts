@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { DatabaseModule } from '@app/database';
 import { CoreApiController } from './core-api.controller';
 import { CoreApiService } from './core-api.service';
@@ -11,6 +13,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     DatabaseModule,
     UsersModule,
     AuthModule,
@@ -18,6 +21,6 @@ import { NotificationsModule } from './notifications/notifications.module';
     NotificationsModule,
   ],
   controllers: [CoreApiController],
-  providers: [CoreApiService],
+  providers: [CoreApiService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class CoreApiModule {}
