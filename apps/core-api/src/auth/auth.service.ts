@@ -1,9 +1,11 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
@@ -16,6 +18,7 @@ const BCRYPT_ROUNDS = 12;
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   private readonly accessSecret: string;
   private readonly accessTtl: string;
   private readonly refreshSecret: string;
@@ -92,6 +95,18 @@ export class AuthService {
       // Ignore invalid tokens on logout — it is idempotent.
     }
     return { success: true };
+  }
+
+  // Refresh tokens are single-use and short-lived; revoked/expired rows are
+  // dead weight, so sweep them daily to keep the table bounded.
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async pruneStaleTokens(): Promise<void> {
+    const { count } = await this.prisma.refreshToken.deleteMany({
+      where: { OR: [{ revoked: true }, { expiresAt: { lt: new Date() } }] },
+    });
+    if (count > 0) {
+      this.logger.log(`Pruned ${count} stale refresh token(s)`);
+    }
   }
 
   private async issueTokens(userId: string, email: string): Promise<Tokens> {
