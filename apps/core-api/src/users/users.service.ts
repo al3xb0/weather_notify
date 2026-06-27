@@ -58,6 +58,15 @@ export class UsersService {
     return { url: `https://t.me/${botUsername}?start=${token}`, token };
   }
 
+  /** Unbind Telegram: clears the chat id and any pending link token. */
+  async unlinkTelegram(userId: string): Promise<{ success: boolean }> {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { telegramChatId: null, telegramLinkToken: null },
+    });
+    return { success: true };
+  }
+
   /** Bind a Telegram chat id to the user owning the given link token (bot side). */
   async bindTelegram(token: string, chatId: string): Promise<boolean> {
     const user = await this.prisma.user.findUnique({

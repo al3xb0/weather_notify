@@ -31,6 +31,11 @@ export class UsersController {
     return this.users.createTelegramLink(user.userId, botUsername);
   }
 
+  @Delete('me/telegram')
+  unlinkTelegram(@CurrentUser() user: AuthUser) {
+    return this.users.unlinkTelegram(user.userId);
+  }
+
   @Get('me/push')
   listPush(@CurrentUser() user: AuthUser) {
     return this.users.listPushSubscriptions(user.userId);
