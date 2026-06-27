@@ -24,6 +24,10 @@ export function isSevereWeatherCode(code: number): boolean {
   return SEVERE_WEATHER_CODES.has(code);
 }
 
+// Metrics are floats, so exact equality almost never holds. Treat EQ as
+// "within half a unit" of the threshold.
+const EQ_TOLERANCE = 0.5;
+
 function metricValue(snapshot: WeatherSnapshot, metric: Metric): number {
   switch (metric) {
     case Metric.TEMPERATURE:
@@ -56,7 +60,7 @@ function compare(
     case Operator.LTE:
       return value <= threshold;
     case Operator.EQ:
-      return value === threshold;
+      return Math.abs(value - threshold) <= EQ_TOLERANCE;
   }
 }
 

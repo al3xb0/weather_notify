@@ -50,6 +50,15 @@ describe('evaluateCondition', () => {
     ).toBe(false);
   });
 
+  it('matches EQ within the float tolerance', () => {
+    expect(
+      evaluateCondition(snapshot, Metric.TEMPERATURE, Operator.EQ, 31.3).matched,
+    ).toBe(true);
+    expect(
+      evaluateCondition(snapshot, Metric.TEMPERATURE, Operator.EQ, 31.6).matched,
+    ).toBe(false);
+  });
+
   it('reads the right metric value', () => {
     expect(
       evaluateCondition(snapshot, Metric.APPARENT_TEMP, Operator.GT, 33)
