@@ -3,10 +3,14 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
 import { Trigger, TriggerState } from '@prisma/client';
 import { PrismaService } from '@app/database';
-import { evaluateCondition, WeatherSnapshot } from '@app/common';
+import { evaluateCondition, RedisService, WeatherSnapshot } from '@app/common';
 import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
 import { WeatherService } from './weather/weather.service';
 import { RabbitPublisherService } from './messaging/rabbit-publisher.service';
+
+const CYCLE_LOCK_KEY = 'watcher:cycle:lock';
+// Auto-expires if a cycle crashes without releasing; longer than any sane run.
+const CYCLE_LOCK_TTL_SEC = 600;
 
 @Injectable()
 export class WatcherService {
@@ -16,12 +20,27 @@ export class WatcherService {
     private readonly prisma: PrismaService,
     private readonly weather: WeatherService,
     private readonly publisher: RabbitPublisherService,
+    private readonly redis: RedisService,
   ) {}
 
   @Cron(process.env.WATCHER_CRON || CronExpression.EVERY_5_MINUTES, {
     name: 'weather-poll',
   })
   async runCycle(): Promise<void> {
+    // Distributed lock so a slow cycle never overlaps with the next tick.
+    const acquired = await this.redis.claim(CYCLE_LOCK_KEY, CYCLE_LOCK_TTL_SEC);
+    if (!acquired) {
+      this.logger.warn('Previous cycle still running — skipping this tick');
+      return;
+    }
+    try {
+      await this.poll();
+    } finally {
+      await this.redis.client.del(CYCLE_LOCK_KEY);
+    }
+  }
+
+  private async poll(): Promise<void> {
     const triggers = await this.prisma.trigger.findMany({
       where: { isActive: true },
     });
