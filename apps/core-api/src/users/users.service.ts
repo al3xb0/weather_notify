@@ -11,6 +11,8 @@ import {
   DeletePushSubscriptionDto,
 } from './dto/push-subscription.dto';
 
+const TELEGRAM_LINK_TTL_MS = 15 * 60 * 1000;
+
 export interface UserProfile {
   id: string;
   email: string;
@@ -57,7 +59,10 @@ export class UsersService {
     const token = randomUUID();
     await this.prisma.user.update({
       where: { id: userId },
-      data: { telegramLinkToken: token },
+      data: {
+        telegramLinkToken: token,
+        telegramLinkTokenExpiresAt: new Date(Date.now() + TELEGRAM_LINK_TTL_MS),
+      },
     });
     return { url: `https://t.me/${botUsername}?start=${token}`, token };
   }
@@ -66,7 +71,11 @@ export class UsersService {
   async unlinkTelegram(userId: string): Promise<{ success: boolean }> {
     await this.prisma.user.update({
       where: { id: userId },
-      data: { telegramChatId: null, telegramLinkToken: null },
+      data: {
+        telegramChatId: null,
+        telegramLinkToken: null,
+        telegramLinkTokenExpiresAt: null,
+      },
     });
     return { success: true };
   }
@@ -79,9 +88,22 @@ export class UsersService {
     if (!user) {
       return false;
     }
+    const expiresAt = user.telegramLinkTokenExpiresAt;
+    if (!expiresAt || expiresAt < new Date()) {
+      // Expired token: clear it so a stale deep-link cannot be reused.
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { telegramLinkToken: null, telegramLinkTokenExpiresAt: null },
+      });
+      return false;
+    }
     await this.prisma.user.update({
       where: { id: user.id },
-      data: { telegramChatId: chatId, telegramLinkToken: null },
+      data: {
+        telegramChatId: chatId,
+        telegramLinkToken: null,
+        telegramLinkTokenExpiresAt: null,
+      },
     });
     return true;
   }

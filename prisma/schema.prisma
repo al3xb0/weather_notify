@@ -46,6 +46,7 @@ model User {
   passwordHash     String
   telegramChatId   String?
   telegramLinkToken String?           @unique
+  telegramLinkTokenExpiresAt DateTime?
   triggers         Trigger[]
   pushSubs         PushSubscription[]
   notifications    Notification[]
