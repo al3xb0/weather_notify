@@ -1,15 +1,27 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma, Trigger } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
 
+const MAX_TRIGGERS_PER_USER = 20;
+
 @Injectable()
 export class TriggersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  create(userId: string, dto: CreateTriggerDto): Promise<Trigger> {
+  async create(userId: string, dto: CreateTriggerDto): Promise<Trigger> {
+    const count = await this.prisma.trigger.count({ where: { userId } });
+    if (count >= MAX_TRIGGERS_PER_USER) {
+      throw new BadRequestException(
+        `Trigger limit reached (max ${MAX_TRIGGERS_PER_USER})`,
+      );
+    }
     return this.prisma.trigger.create({
       data: { ...dto, userId },
     });
