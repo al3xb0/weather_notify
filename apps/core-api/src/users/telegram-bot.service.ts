@@ -89,7 +89,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     if (!linkToken) {
       await this.reply(
         chatId,
-        'Привет! Чтобы получать уведомления о погоде, откройте раздел «Настройки» в Weather Notify и нажмите «Привязать Telegram».',
+        'Hi! To receive weather notifications, open the "Settings" section in Weather Notify and tap "Link Telegram."',
       );
       return;
     }
@@ -98,8 +98,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     await this.reply(
       chatId,
       bound
-        ? '✅ Telegram привязан! Теперь вы будете получать сюда уведомления о погоде.'
-        : '⚠️ Ссылка недействительна или устарела. Сгенерируйте новую в настройках Weather Notify.',
+        ? '✅ Telegram linked! You will now receive weather notifications here.'
+        : '⚠️ The link is invalid or expired. Generate a new one in the Weather Notify settings.',
     );
   }
 
