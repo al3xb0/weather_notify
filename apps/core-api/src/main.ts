@@ -9,10 +9,13 @@ async function bootstrap() {
   const config = app.get(ConfigService);
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-  app.enableCors({
-    origin: config.get<string>('CORS_ORIGIN') ?? true,
-    credentials: true,
-  });
+  // Explicit allow-list (comma-separated) instead of reflecting any origin.
+  // Auth is Bearer-token based, so cookies/credentials are not needed.
+  const corsOrigins = (config.get<string>('CORS_ORIGIN') ?? 'http://localhost:3001')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  app.enableCors({ origin: corsOrigins, credentials: false });
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Weather Notify — Core API')
