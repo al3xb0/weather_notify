@@ -60,6 +60,11 @@ services:
     command: sh -c "npx prisma migrate deploy && node dist/apps/core-api/main"
     ports:
       - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +85,11 @@ services:
       DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     depends_on:
       core-api:
         condition: service_started
@@ -102,6 +112,11 @@ services:
       DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     depends_on:
       postgres:
         condition: service_healthy

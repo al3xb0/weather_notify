@@ -9,4 +9,9 @@ export class CoreApiController {
   getHello(): string {
     return this.coreApiService.getHello();
   }
+
+  @Get('health')
+  health(): { status: string } {
+    return { status: 'ok' };
+  }
 }
