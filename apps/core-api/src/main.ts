@@ -11,7 +11,9 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   // Explicit allow-list (comma-separated) instead of reflecting any origin.
   // Auth is Bearer-token based, so cookies/credentials are not needed.
-  const corsOrigins = (config.get<string>('CORS_ORIGIN') ?? 'http://localhost:3001')
+  const corsOrigins = (
+    config.get<string>('CORS_ORIGIN') ?? 'http://localhost:3001'
+  )
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
