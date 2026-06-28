@@ -199,8 +199,14 @@ export class AuthService {
   }
 
   private async issueTokens(userId: string, email: string): Promise<Tokens> {
+    // Carry the current role so guards can authorize without a DB round-trip;
+    // re-read here so a promotion/demotion takes effect on the next token.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
     const accessToken = await this.jwt.signAsync(
-      { sub: userId, email },
+      { sub: userId, email, role: user?.role ?? 'USER' },
       {
         secret: this.accessSecret,
         expiresIn: Math.floor(this.accessTtlMs / 1000),

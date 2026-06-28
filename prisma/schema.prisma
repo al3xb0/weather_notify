@@ -45,10 +45,16 @@ enum NotifStatus {
   FAILED
 }
 
+enum Role {
+  USER
+  ADMIN
+}
+
 model User {
   id               String             @id @default(uuid())
   email            String             @unique
   passwordHash     String
+  role             Role               @default(USER)
   telegramChatId   String?
   telegramLinkToken String?           @unique
   telegramLinkTokenExpiresAt DateTime?

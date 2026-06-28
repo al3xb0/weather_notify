@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '@app/database';
-import { PushSubscription, User } from '@prisma/client';
+import { PushSubscription, Role, User } from '@prisma/client';
 import {
   CreatePushSubscriptionDto,
   DeletePushSubscriptionDto,
@@ -17,6 +17,7 @@ const TELEGRAM_LINK_TTL_MS = 15 * 60 * 1000;
 export interface UserProfile {
   id: string;
   email: string;
+  role: Role;
   telegramChatId: string | null;
   telegramLinked: boolean;
   emailVerified: boolean;
@@ -50,6 +51,7 @@ export class UsersService {
     return {
       id: user.id,
       email: user.email,
+      role: user.role,
       telegramChatId: user.telegramChatId,
       telegramLinked: Boolean(user.telegramChatId),
       emailVerified: user.emailVerified,
