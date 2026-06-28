@@ -10,6 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { TriggersService } from './triggers.service';
 import { CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
@@ -55,6 +56,7 @@ export class TriggersController {
   }
 
   @Post(':id/test')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   test(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.triggers.sendTest(user.userId, id);
   }
