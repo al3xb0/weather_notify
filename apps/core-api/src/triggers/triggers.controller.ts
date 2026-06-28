@@ -50,6 +50,11 @@ export class TriggersController {
     return this.triggers.update(user.userId, id, dto);
   }
 
+  @Delete()
+  clear(@CurrentUser() user: AuthUser) {
+    return this.triggers.clear(user.userId);
+  }
+
   @Delete(':id')
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.triggers.remove(user.userId, id);

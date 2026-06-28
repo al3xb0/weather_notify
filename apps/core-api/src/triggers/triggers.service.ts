@@ -128,6 +128,14 @@ export class TriggersService {
     return { id };
   }
 
+  async clear(userId: string): Promise<{ count: number }> {
+    // Conditions cascade on delete at the DB level.
+    const { count } = await this.prisma.trigger.deleteMany({
+      where: { userId },
+    });
+    return { count };
+  }
+
   /**
    * Publish a test event for the trigger through its configured channels. Runs
    * the normal notifier path (retry/DLQ + history) but flagged as a test.
