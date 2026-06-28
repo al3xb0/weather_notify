@@ -103,22 +103,37 @@ export class WatcherService {
       trigger.threshold,
     );
 
+    // Recorded on every evaluation so the UI can show the current value and
+    // explain why a trigger is (not) firing. Merged into whatever state write
+    // the cycle already needs to avoid a second query per trigger.
+    const observation = {
+      lastObservedValue: observedValue,
+      lastEvaluatedAt: new Date(),
+      lastMatched: matched,
+    };
+
     if (!matched) {
       // Re-arm so the next crossing fires again (hysteresis).
-      if (trigger.state === TriggerState.FIRED) {
-        await this.prisma.trigger.update({
-          where: { id: trigger.id },
-          data: { state: TriggerState.ARMED },
-        });
-      }
+      await this.prisma.trigger.update({
+        where: { id: trigger.id },
+        data:
+          trigger.state === TriggerState.FIRED
+            ? { ...observation, state: TriggerState.ARMED }
+            : observation,
+      });
       return;
     }
 
     if (!this.shouldFire(trigger)) {
+      // Matched but suppressed by cooldown — still record the observation.
+      await this.prisma.trigger.update({
+        where: { id: trigger.id },
+        data: observation,
+      });
       return;
     }
 
-    await this.fire(trigger, observedValue);
+    await this.fire(trigger, observedValue, observation);
   }
 
   private shouldFire(trigger: Trigger): boolean {
@@ -132,7 +147,15 @@ export class WatcherService {
     return elapsedMs >= trigger.cooldownMin * 60_000;
   }
 
-  private async fire(trigger: Trigger, observedValue: number): Promise<void> {
+  private async fire(
+    trigger: Trigger,
+    observedValue: number,
+    observation: {
+      lastObservedValue: number;
+      lastEvaluatedAt: Date;
+      lastMatched: boolean;
+    },
+  ): Promise<void> {
     const event: TriggerFiredEvent = {
       eventId: randomUUID(),
       triggerId: trigger.id,
@@ -153,7 +176,7 @@ export class WatcherService {
 
     await this.prisma.trigger.update({
       where: { id: trigger.id },
-      data: { state: TriggerState.FIRED, lastFiredAt: new Date() },
+      data: { ...observation, state: TriggerState.FIRED, lastFiredAt: new Date() },
     });
 
     this.logger.log(

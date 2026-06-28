@@ -150,7 +150,7 @@ describe('WatcherService', () => {
       expect(update.data.lastFiredAt).toBeInstanceOf(Date);
     });
 
-    it('does not re-fire a FIRED trigger inside its cooldown', async () => {
+    it('records the observation but does not re-fire a FIRED trigger inside its cooldown', async () => {
       await process(
         makeTrigger({
           state: TriggerState.FIRED,
@@ -159,7 +159,10 @@ describe('WatcherService', () => {
         }),
       );
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      expect(m.prisma.trigger.update).not.toHaveBeenCalled();
+      const update = m.prisma.trigger.update.mock.calls[0][0];
+      expect(update.data).toMatchObject({ lastMatched: true, lastObservedValue: 35 });
+      expect(update.data.state).toBeUndefined();
+      expect(update.data.lastFiredAt).toBeUndefined();
     });
 
     it('re-fires a FIRED trigger once its cooldown has elapsed', async () => {
@@ -187,17 +190,27 @@ describe('WatcherService', () => {
       evalMock.mockReturnValue({ matched: false, observedValue: 10 });
       await process(makeTrigger({ state: TriggerState.FIRED }));
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      expect(m.prisma.trigger.update).toHaveBeenCalledWith({
-        where: { id: 't1' },
-        data: { state: TriggerState.ARMED },
+      const update = m.prisma.trigger.update.mock.calls[0][0];
+      expect(update.where).toEqual({ id: 't1' });
+      expect(update.data).toMatchObject({
+        state: TriggerState.ARMED,
+        lastMatched: false,
+        lastObservedValue: 10,
       });
+      expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
     });
 
-    it('does nothing for an unmatched ARMED trigger', async () => {
+    it('records the observation for an unmatched ARMED trigger without changing state', async () => {
       evalMock.mockReturnValue({ matched: false, observedValue: 10 });
       await process(makeTrigger({ state: TriggerState.ARMED }));
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      expect(m.prisma.trigger.update).not.toHaveBeenCalled();
+      const update = m.prisma.trigger.update.mock.calls[0][0];
+      expect(update.data).toMatchObject({
+        lastMatched: false,
+        lastObservedValue: 10,
+      });
+      expect(update.data.state).toBeUndefined();
+      expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
     });
 
     it('fans the event out to every enabled channel', async () => {
