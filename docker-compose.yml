@@ -3,6 +3,7 @@ services:
     image: postgres:16-alpine
     container_name: wn_postgres
     restart: unless-stopped
+    mem_limit: 512m
     environment:
       POSTGRES_USER: weather
       POSTGRES_PASSWORD: weather
@@ -21,6 +22,7 @@ services:
     image: redis:7-alpine
     container_name: wn_redis
     restart: unless-stopped
+    mem_limit: 256m
     ports:
       - "6379:6379"
     healthcheck:
@@ -33,12 +35,14 @@ services:
     image: rabbitmq:3-management-alpine
     container_name: wn_rabbitmq
     restart: unless-stopped
+    mem_limit: 512m
     environment:
       RABBITMQ_DEFAULT_USER: weather
       RABBITMQ_DEFAULT_PASS: weather
     ports:
       - "5672:5672"
-      - "15672:15672"
+      # Management UI is dev-only — do NOT publish it in production.
+      # - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 15s
@@ -52,6 +56,7 @@ services:
         APP: core-api
     container_name: wn_core_api
     restart: unless-stopped
+    mem_limit: 512m
     env_file: .env
     environment:
       DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
@@ -80,6 +85,7 @@ services:
         APP: watcher
     container_name: wn_watcher
     restart: unless-stopped
+    mem_limit: 384m
     env_file: .env
     environment:
       DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
@@ -107,6 +113,7 @@ services:
         APP: notifier
     container_name: wn_notifier
     restart: unless-stopped
+    mem_limit: 384m
     env_file: .env
     environment:
       DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public

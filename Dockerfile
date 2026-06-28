@@ -16,6 +16,10 @@ COPY prisma ./prisma
 RUN npm ci --omit=dev --ignore-scripts && npx prisma generate && npm cache clean --force
 COPY --from=builder /app/dist ./dist
 
+# Drop root: the node:alpine image ships an unprivileged `node` user (uid 1000).
+# All copied files are world-readable, so the runtime needs no write access.
+USER node
+
 ARG APP=core-api
 ENV APP=${APP}
 CMD ["sh", "-c", "node dist/apps/$APP/main"]
