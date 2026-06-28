@@ -17,7 +17,7 @@ export class EmailChannel implements NotificationChannel {
 
   async send(event: TriggerFiredEvent): Promise<void> {
     if (!this.mail.configured) {
-      throw new PermanentNotificationError('RESEND_API_KEY is not set');
+      throw new PermanentNotificationError('Mailer is not configured');
     }
     const user = await this.prisma.user.findUnique({
       where: { id: event.userId },

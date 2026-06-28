@@ -20,7 +20,7 @@ flowchart LR
     MQ -->|email.fired| NOTIF
     MQ -->|push.fired| NOTIF
     NOTIF --> TG[Telegram]
-    NOTIF --> MAIL[Resend Email]
+    NOTIF --> MAIL[SMTP Email]
     NOTIF --> WP[Web Push]
     NOTIF -->|log SENT/FAILED| PG
 ```
@@ -48,7 +48,7 @@ enums), `common` (`evaluateCondition`, Redis).
 ## Tech stack
 
 Node 22 · TypeScript · NestJS 11 · Prisma 6 + PostgreSQL · RabbitMQ ·
-Redis · Passport/JWT · Open-Meteo · Resend · web-push · Docker Compose · GitHub Actions.
+Redis · Passport/JWT · Open-Meteo · Nodemailer (SMTP) · web-push · Docker Compose · GitHub Actions.
 
 ## Anti-spam design
 
@@ -91,5 +91,5 @@ parameterized `Dockerfile` (`APP` arg).
 
 ## Security
 
-Public repo: only `.env.example` is committed. All secrets (DB, JWT, bot token, Resend,
+Public repo: only `.env.example` is committed. All secrets (DB, JWT, bot token, SMTP,
 VAPID) are provided via environment variables.

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Resend } from 'resend';
+import { createTransport, type Transporter } from 'nodemailer';
 
 export interface MailMessage {
   to: string;
@@ -9,36 +9,47 @@ export interface MailMessage {
 }
 
 /**
- * Thin Resend wrapper shared by the notifier (alert emails) and core-api
- * (verification emails). Becomes a no-op sender when RESEND_API_KEY is unset.
+ * Thin SMTP wrapper (Nodemailer) shared by the notifier (alert emails) and
+ * core-api (verification emails). Becomes a no-op sender when SMTP_HOST is
+ * unset, so any free SMTP provider (Gmail, Brevo, Mailtrap, …) can back it.
  */
 @Injectable()
 export class MailService {
-  private readonly resend: Resend | null;
+  private readonly transporter: Transporter | null;
   private readonly from: string;
 
   constructor(config: ConfigService) {
-    const apiKey = config.get<string>('RESEND_API_KEY') ?? '';
-    this.resend = apiKey ? new Resend(apiKey) : null;
-    this.from = config.get<string>('RESEND_FROM') ?? 'alerts@example.com';
+    const host = config.get<string>('SMTP_HOST') ?? '';
+    this.from = config.get<string>('MAIL_FROM') ?? 'alerts@example.com';
+    if (!host) {
+      this.transporter = null;
+      return;
+    }
+    const port = Number(config.get<string>('SMTP_PORT') ?? '587');
+    const user = config.get<string>('SMTP_USER') ?? '';
+    const pass = config.get<string>('SMTP_PASS') ?? '';
+    this.transporter = createTransport({
+      host,
+      port,
+      // 465 implies implicit TLS; 587/others upgrade via STARTTLS.
+      secure: config.get<string>('SMTP_SECURE') === 'true' || port === 465,
+      auth: user ? { user, pass } : undefined,
+    });
   }
 
   get configured(): boolean {
-    return this.resend !== null;
+    return this.transporter !== null;
   }
 
   async send(message: MailMessage): Promise<void> {
-    if (!this.resend) {
-      throw new Error('RESEND_API_KEY is not set');
+    if (!this.transporter) {
+      throw new Error('SMTP is not configured (SMTP_HOST is unset)');
     }
-    const { error } = await this.resend.emails.send({
+    await this.transporter.sendMail({
       from: this.from,
       to: message.to,
       subject: message.subject,
       html: message.html,
     });
-    if (error) {
-      throw new Error(`Resend error: ${error.message}`);
-    }
   }
 }
