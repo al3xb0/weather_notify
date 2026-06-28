@@ -5,6 +5,7 @@ import { Trigger, TriggerState } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import {
   evaluateCondition,
+  isWithinQuietHours,
   RabbitPublisherService,
   RedisService,
   WeatherSnapshot,
@@ -15,6 +16,14 @@ import { WeatherService } from './weather/weather.service';
 const CYCLE_LOCK_KEY = 'watcher:cycle:lock';
 // Auto-expires if a cycle crashes without releasing; longer than any sane run.
 const CYCLE_LOCK_TTL_SEC = 600;
+
+type QuietHoursUser = {
+  quietHoursStart: string | null;
+  quietHoursEnd: string | null;
+  timezone: string | null;
+};
+// The user's quiet-hours window is joined onto each trigger for the cycle.
+type WatchedTrigger = Trigger & { user?: QuietHoursUser };
 
 @Injectable()
 export class WatcherService {
@@ -55,6 +64,15 @@ export class WatcherService {
   private async poll(): Promise<void> {
     const triggers = await this.prisma.trigger.findMany({
       where: { isActive: true },
+      include: {
+        user: {
+          select: {
+            quietHoursStart: true,
+            quietHoursEnd: true,
+            timezone: true,
+          },
+        },
+      },
     });
     if (triggers.length === 0) {
       return;
@@ -82,8 +100,10 @@ export class WatcherService {
     }
   }
 
-  private groupByLocation(triggers: Trigger[]): Map<string, Trigger[]> {
-    const map = new Map<string, Trigger[]>();
+  private groupByLocation(
+    triggers: WatchedTrigger[],
+  ): Map<string, WatchedTrigger[]> {
+    const map = new Map<string, WatchedTrigger[]>();
     for (const t of triggers) {
       const key = `${t.latitude.toFixed(2)}:${t.longitude.toFixed(2)}`;
       const bucket = map.get(key);
@@ -97,7 +117,7 @@ export class WatcherService {
   }
 
   private async processTrigger(
-    trigger: Trigger,
+    trigger: WatchedTrigger,
     snapshot: WeatherSnapshot,
   ): Promise<void> {
     const { matched, observedValue } = evaluateCondition(
@@ -137,7 +157,33 @@ export class WatcherService {
       return;
     }
 
+    if (this.isQuietHours(trigger)) {
+      // Suppress delivery during quiet hours; stay ARMED so it can still fire
+      // once the window passes if the condition holds.
+      await this.prisma.trigger.update({
+        where: { id: trigger.id },
+        data: observation,
+      });
+      this.logger.log(
+        `Trigger "${trigger.name}" (${trigger.id}) matched during quiet hours — suppressed`,
+      );
+      return;
+    }
+
     await this.fire(trigger, observedValue, observation);
+  }
+
+  private isQuietHours(trigger: WatchedTrigger): boolean {
+    const u = trigger.user;
+    if (!u) {
+      return false;
+    }
+    return isWithinQuietHours(
+      new Date(),
+      u.quietHoursStart,
+      u.quietHoursEnd,
+      u.timezone,
+    );
   }
 
   private shouldFire(trigger: Trigger): boolean {

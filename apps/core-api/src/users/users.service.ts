@@ -10,6 +10,7 @@ import {
   CreatePushSubscriptionDto,
   DeletePushSubscriptionDto,
 } from './dto/push-subscription.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 
 const TELEGRAM_LINK_TTL_MS = 15 * 60 * 1000;
 
@@ -18,6 +19,9 @@ export interface UserProfile {
   email: string;
   telegramChatId: string | null;
   telegramLinked: boolean;
+  quietHoursStart: string | null;
+  quietHoursEnd: string | null;
+  timezone: string | null;
   createdAt: Date;
 }
 
@@ -47,8 +51,27 @@ export class UsersService {
       email: user.email,
       telegramChatId: user.telegramChatId,
       telegramLinked: Boolean(user.telegramChatId),
+      quietHoursStart: user.quietHoursStart,
+      quietHoursEnd: user.quietHoursEnd,
+      timezone: user.timezone,
       createdAt: user.createdAt,
     };
+  }
+
+  /** Update notification preferences (quiet hours + timezone). */
+  async updateProfile(
+    userId: string,
+    dto: UpdateProfileDto,
+  ): Promise<UserProfile> {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        quietHoursStart: dto.quietHoursStart,
+        quietHoursEnd: dto.quietHoursEnd,
+        timezone: dto.timezone,
+      },
+    });
+    return this.getProfile(userId);
   }
 
   /** Generate a one-time deep-link the user opens to bind their Telegram chat. */

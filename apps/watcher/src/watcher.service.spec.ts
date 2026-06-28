@@ -3,13 +3,15 @@ import { WatcherService } from './watcher.service';
 
 jest.mock('@app/common', () => ({
   evaluateCondition: jest.fn(),
+  isWithinQuietHours: jest.fn(() => false),
   // Constructor type only; never instantiated under direct unit construction.
   RedisService: class {},
 }));
 
-import { evaluateCondition } from '@app/common';
+import { evaluateCondition, isWithinQuietHours } from '@app/common';
 
 const evalMock = evaluateCondition as jest.Mock;
+const quietMock = isWithinQuietHours as jest.Mock;
 
 type Mocked = {
   prisma: { trigger: { findMany: jest.Mock; update: jest.Mock } };
@@ -60,6 +62,8 @@ describe('WatcherService', () => {
     };
     evalMock.mockReset();
     evalMock.mockReturnValue({ matched: true, observedValue: 35 });
+    quietMock.mockReset();
+    quietMock.mockReturnValue(false);
 
     service = new WatcherService(
       m.prisma as never,
@@ -211,6 +215,24 @@ describe('WatcherService', () => {
       });
       expect(update.data.state).toBeUndefined();
       expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
+    });
+
+    it('suppresses firing during quiet hours but records the observation', async () => {
+      quietMock.mockReturnValue(true);
+      await process(
+        makeTrigger({
+          state: TriggerState.ARMED,
+          user: {
+            quietHoursStart: '22:00',
+            quietHoursEnd: '07:00',
+            timezone: 'UTC',
+          },
+        } as never),
+      );
+      expect(m.publisher.publish).not.toHaveBeenCalled();
+      const update = m.prisma.trigger.update.mock.calls[0][0];
+      expect(update.data.state).toBeUndefined();
+      expect(update.data).toMatchObject({ lastMatched: true });
     });
 
     it('fans the event out to every enabled channel', async () => {
