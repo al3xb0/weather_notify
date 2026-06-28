@@ -12,7 +12,13 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
   const config = app.get(ConfigService);
 
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
   app.use(cookieParser());
   // Explicit allow-list (comma-separated) instead of reflecting any origin.
   // Credentials are enabled so the refresh token can ride in an httpOnly cookie.
