@@ -40,7 +40,9 @@ export function getHistogram(
       name,
       help,
       labelNames,
-      buckets,
+      // Omit the key entirely when unset — prom-client overwrites its default
+      // buckets with an explicit `undefined`, which crashes the constructor.
+      ...(buckets ? { buckets } : {}),
       registers: [metricsRegistry],
     })
   );
