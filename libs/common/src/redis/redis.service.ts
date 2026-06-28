@@ -26,6 +26,19 @@ export class RedisService implements OnModuleDestroy {
   }
 
   /**
+   * Rate-limit a named action. Reserves the key for ttlSec on the first call
+   * and returns 0 (allowed); subsequent calls within the window return the
+   * whole seconds remaining before it frees up. Survives client reloads since
+   * the window lives in Redis.
+   */
+  async consumeCooldown(key: string, ttlSec: number): Promise<number> {
+    const reserved = await this.client.set(key, '1', 'EX', ttlSec, 'NX');
+    if (reserved === 'OK') return 0;
+    const ttl = await this.client.ttl(key);
+    return ttl > 0 ? ttl : ttlSec;
+  }
+
+  /**
    * Acquire a fenced lock: returns a unique token when the key was free, else
    * null. The token must be passed back to releaseLock so a slow holder cannot
    * delete a lock another instance has since acquired.

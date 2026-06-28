@@ -28,6 +28,7 @@ describe('TriggersService', () => {
     user: { findUnique: jest.Mock };
   };
   let publisher: { publish: jest.Mock };
+  let redis: { consumeCooldown: jest.Mock };
   let service: TriggersService;
 
   beforeEach(() => {
@@ -42,7 +43,12 @@ describe('TriggersService', () => {
       },
     };
     publisher = { publish: jest.fn().mockResolvedValue(undefined) };
-    service = new TriggersService(prisma as never, publisher as never);
+    redis = { consumeCooldown: jest.fn().mockResolvedValue(0) };
+    service = new TriggersService(
+      prisma as never,
+      publisher as never,
+      redis as never,
+    );
   });
 
   describe('create soft-gate', () => {
@@ -103,6 +109,14 @@ describe('TriggersService', () => {
     await expect(service.sendTest('u1', 'x')).rejects.toThrow(
       'Trigger not found',
     );
+    expect(publisher.publish).not.toHaveBeenCalled();
+  });
+
+  it('rejects a test while the per-user cooldown is active', async () => {
+    redis.consumeCooldown.mockResolvedValue(42);
+    await expect(service.sendTest('u1', 't1')).rejects.toMatchObject({
+      response: { retryAfter: 42 },
+    });
     expect(publisher.publish).not.toHaveBeenCalled();
   });
 });

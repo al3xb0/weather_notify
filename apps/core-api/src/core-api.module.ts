@@ -5,7 +5,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { DatabaseModule } from '@app/database';
-import { loggerParams } from '@app/common';
+import { loggerParams, RedisModule } from '@app/common';
 import { CoreApiController } from './core-api.controller';
 import { CoreApiService } from './core-api.service';
 import { AuthModule } from './auth/auth.module';
@@ -21,6 +21,7 @@ import { MetricsModule } from './metrics/metrics.module';
     ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     DatabaseModule,
+    RedisModule,
     MetricsModule,
     UsersModule,
     AuthModule,

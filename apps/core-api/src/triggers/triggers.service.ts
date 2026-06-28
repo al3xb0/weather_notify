@@ -1,19 +1,24 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { Channel, Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
-import { RabbitPublisherService } from '@app/common';
+import { RabbitPublisherService, RedisService } from '@app/common';
 import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
 import { ConditionDto, CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
 
 const MAX_TRIGGERS_PER_USER = 20;
+// Per-user gap between manual test sends, enforced server-side so creating a
+// fresh trigger or reloading the page can't bypass it.
+const TEST_COOLDOWN_SEC = 60;
 const TRIGGER_INCLUDE = {
   conditions: { orderBy: { order: 'asc' as const } },
 } satisfies Prisma.TriggerInclude;
@@ -36,6 +41,7 @@ export class TriggersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly publisher: RabbitPublisherService,
+    private readonly redis: RedisService,
   ) {}
 
   async create(
@@ -142,6 +148,19 @@ export class TriggersService {
    */
   async sendTest(userId: string, id: string): Promise<{ sent: Channel[] }> {
     const trigger = await this.findOne(userId, id);
+    const retryAfter = await this.redis.consumeCooldown(
+      `trigger-test:${userId}`,
+      TEST_COOLDOWN_SEC,
+    );
+    if (retryAfter > 0) {
+      throw new HttpException(
+        {
+          message: `Please wait ${retryAfter}s before sending another test`,
+          retryAfter,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     const event: TriggerFiredEvent = {
       eventId: randomUUID(),
       triggerId: trigger.id,
