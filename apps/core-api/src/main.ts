@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import cookieParser from 'cookie-parser';
+import { startHealthServer } from '@app/common';
 import { CoreApiModule } from './core-api.module';
 
 async function bootstrap() {
@@ -33,5 +34,8 @@ async function bootstrap() {
   SwaggerModule.setup('docs', app, document);
 
   await app.listen(config.get<number>('CORE_API_PORT') ?? 3000);
+  // Metrics live on a separate, unpublished port so internal data is never
+  // reachable from the public API (mirrors watcher/notifier health servers).
+  startHealthServer(config.get<number>('CORE_API_METRICS_PORT') ?? 3004, 'CoreApi');
 }
 void bootstrap();
