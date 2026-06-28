@@ -3,6 +3,8 @@
   "rootDir": "../../..",
   "testEnvironment": "node",
   "testRegex": "apps/core-api/.*\\.e2e-spec\\.ts$",
+  "setupFiles": ["<rootDir>/apps/core-api/test/setup-e2e.ts"],
+  "testTimeout": 30000,
   "transform": {
     "^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": "<rootDir>/tsconfig.spec.json" }]
   },

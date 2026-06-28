@@ -16,7 +16,11 @@ export function initDefaultMetrics(): void {
 }
 
 /** Get-or-create a Counter so re-imports never double-register. */
-export function getCounter(name: string, help: string, labelNames: string[] = []): Counter {
+export function getCounter(
+  name: string,
+  help: string,
+  labelNames: string[] = [],
+): Counter {
   return (
     (metricsRegistry.getSingleMetric(name) as Counter) ??
     new Counter({ name, help, labelNames, registers: [metricsRegistry] })
@@ -32,6 +36,12 @@ export function getHistogram(
 ): Histogram {
   return (
     (metricsRegistry.getSingleMetric(name) as Histogram) ??
-    new Histogram({ name, help, labelNames, buckets, registers: [metricsRegistry] })
+    new Histogram({
+      name,
+      help,
+      labelNames,
+      buckets,
+      registers: [metricsRegistry],
+    })
   );
 }

@@ -38,7 +38,12 @@ export class RedisService implements OnModuleDestroy {
 
   /** Release a lock only while we still own it (compare-and-delete via Lua). */
   async releaseLock(key: string, token: string): Promise<boolean> {
-    const res = (await this.client.eval(RELEASE_IF_OWNED, 1, key, token)) as number;
+    const res = (await this.client.eval(
+      RELEASE_IF_OWNED,
+      1,
+      key,
+      token,
+    )) as number;
     return res === 1;
   }
 

@@ -281,7 +281,12 @@ describe('WatcherService', () => {
         conditionLogic: 'AND',
         channels: ['TELEGRAM', 'EMAIL'],
         conditions: [
-          { metric: 'TEMPERATURE', operator: 'GT', threshold: 30, observedValue: 35 },
+          {
+            metric: 'TEMPERATURE',
+            operator: 'GT',
+            threshold: 30,
+            observedValue: 35,
+          },
         ],
       });
       expect(event.eventId).toEqual(expect.any(String));

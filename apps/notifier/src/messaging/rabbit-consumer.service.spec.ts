@@ -1,9 +1,5 @@
 import { ConsumeMessage } from 'amqplib';
-import {
-  DLX_EXCHANGE,
-  NotifStatus,
-  TriggerFiredEvent,
-} from '@app/contracts';
+import { DLX_EXCHANGE, NotifStatus, TriggerFiredEvent } from '@app/contracts';
 import { RabbitConsumerService } from './rabbit-consumer.service';
 import { PermanentNotificationError } from '../channels/channel.types';
 
@@ -54,20 +50,17 @@ describe('RabbitConsumerService failure handling', () => {
       ack: jest.fn(),
       publish: jest.fn().mockResolvedValue(undefined),
     };
-    (service as unknown as { channelWrapper: typeof channelWrapper }).channelWrapper =
-      channelWrapper;
+    (
+      service as unknown as { channelWrapper: typeof channelWrapper }
+    ).channelWrapper = channelWrapper;
   }
 
   const handle = (msg: ConsumeMessage | null): Promise<void> =>
-    (service as unknown as { handle: (c: string, m: unknown) => Promise<void> }).handle(
-      'EMAIL',
-      msg,
-    );
+    (
+      service as unknown as { handle: (c: string, m: unknown) => Promise<void> }
+    ).handle('EMAIL', msg);
 
-  const handleFailure = (
-    msg: ConsumeMessage,
-    err: unknown,
-  ): Promise<void> =>
+  const handleFailure = (msg: ConsumeMessage, err: unknown): Promise<void> =>
     (
       service as unknown as {
         handleFailure: (
@@ -113,7 +106,8 @@ describe('RabbitConsumerService failure handling', () => {
     it('republishes to the retry queue on a transient first failure', async () => {
       await handleFailure(makeMsg(event), new Error('smtp down'));
       expect(channelWrapper.publish).toHaveBeenCalledTimes(1);
-      const [exchange, key, content, opts] = channelWrapper.publish.mock.calls[0];
+      const [exchange, key, content, opts] =
+        channelWrapper.publish.mock.calls[0];
       expect(exchange).toBe(DLX_EXCHANGE);
       expect(key).toBe('email.retry');
       expect(content).toBeInstanceOf(Buffer);

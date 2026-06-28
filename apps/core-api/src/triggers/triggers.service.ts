@@ -113,7 +113,9 @@ export class TriggersService {
         ...(conditionLogic ? { conditionLogic } : {}),
         // Replace the whole condition set when a new one is provided.
         ...(conditions
-          ? { conditions: { deleteMany: {}, create: conditionRows(conditions) } }
+          ? {
+              conditions: { deleteMany: {}, create: conditionRows(conditions) },
+            }
           : {}),
       },
       include: TRIGGER_INCLUDE,

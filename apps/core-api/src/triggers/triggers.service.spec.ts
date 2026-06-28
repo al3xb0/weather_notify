@@ -12,7 +12,12 @@ const TRIGGER = {
   city: 'Berlin',
   conditionLogic: 'AND',
   conditions: [
-    { metric: 'TEMPERATURE', operator: 'GT', threshold: 30, lastObservedValue: 27 },
+    {
+      metric: 'TEMPERATURE',
+      operator: 'GT',
+      threshold: 30,
+      lastObservedValue: 27,
+    },
   ],
   channels: ['TELEGRAM', 'EMAIL'],
 };
@@ -79,7 +84,12 @@ describe('TriggersService', () => {
     prisma.trigger.findFirst.mockResolvedValue({
       ...TRIGGER,
       conditions: [
-        { metric: 'TEMPERATURE', operator: 'GT', threshold: 30, lastObservedValue: null },
+        {
+          metric: 'TEMPERATURE',
+          operator: 'GT',
+          threshold: 30,
+          lastObservedValue: null,
+        },
       ],
     });
     await service.sendTest('u1', 't1');

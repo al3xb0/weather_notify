@@ -42,7 +42,7 @@ export class WeatherService {
 
   private async fetch(lat: number, lon: number): Promise<WeatherSnapshot> {
     const { data } = await firstValueFrom(
-      this.http.get(OPEN_METEO_URL, {
+      this.http.get<unknown>(OPEN_METEO_URL, {
         params: { latitude: lat, longitude: lon, current: CURRENT_FIELDS },
       }),
     );

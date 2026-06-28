@@ -1,4 +1,9 @@
-import { FiredCondition, Metric, Operator, TriggerFiredEvent } from '@app/contracts';
+import {
+  FiredCondition,
+  Metric,
+  Operator,
+  TriggerFiredEvent,
+} from '@app/contracts';
 
 const METRIC_LABEL: Record<Metric, string> = {
   TEMPERATURE: 'Temperature',

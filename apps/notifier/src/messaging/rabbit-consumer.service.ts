@@ -150,7 +150,7 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
       {
         persistent: true,
         contentType: 'application/json',
-        messageId: msg.properties.messageId,
+        messageId: msg.properties.messageId as string | undefined,
         headers: { 'x-attempts': thisAttempt },
       },
     );

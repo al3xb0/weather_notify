@@ -53,10 +53,12 @@ describe('evaluateCondition', () => {
 
   it('matches EQ within the float tolerance', () => {
     expect(
-      evaluateCondition(snapshot, Metric.TEMPERATURE, Operator.EQ, 31.3).matched,
+      evaluateCondition(snapshot, Metric.TEMPERATURE, Operator.EQ, 31.3)
+        .matched,
     ).toBe(true);
     expect(
-      evaluateCondition(snapshot, Metric.TEMPERATURE, Operator.EQ, 31.6).matched,
+      evaluateCondition(snapshot, Metric.TEMPERATURE, Operator.EQ, 31.6)
+        .matched,
     ).toBe(false);
   });
 
@@ -98,9 +100,9 @@ describe('evaluateConditions', () => {
       c(Metric.TEMPERATURE, Operator.GT, 30),
       c(Metric.HUMIDITY, Operator.GTE, 80),
     ];
-    expect(evaluateConditions(snapshot, conds, ConditionLogic.AND).matched).toBe(
-      true,
-    );
+    expect(
+      evaluateConditions(snapshot, conds, ConditionLogic.AND).matched,
+    ).toBe(true);
     const failing = [
       c(Metric.TEMPERATURE, Operator.GT, 30),
       c(Metric.HUMIDITY, Operator.GT, 90),

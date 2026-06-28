@@ -35,7 +35,7 @@ export class AuthController {
       httpOnly: true,
       secure: config.get('NODE_ENV') === 'production',
       sameSite:
-        (config.get<CookieOptions['sameSite']>('COOKIE_SAMESITE')) ?? 'lax',
+        config.get<CookieOptions['sameSite']>('COOKIE_SAMESITE') ?? 'lax',
       path: '/auth',
     };
   }

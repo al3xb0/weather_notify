@@ -1,7 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
-import { Prisma, Trigger, TriggerCondition, TriggerState } from '@prisma/client';
+import {
+  Prisma,
+  Trigger,
+  TriggerCondition,
+  TriggerState,
+} from '@prisma/client';
 import { PrismaService } from '@app/database';
 import {
   evaluateConditions,

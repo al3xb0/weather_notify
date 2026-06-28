@@ -41,8 +41,12 @@ export class AuthService {
     this.accessSecret = config.getOrThrow<string>('JWT_ACCESS_SECRET');
     this.refreshSecret = config.getOrThrow<string>('JWT_REFRESH_SECRET');
     // Parse at boot so a malformed TTL fails fast instead of silently widening.
-    this.accessTtlMs = parseDurationMs(config.get<string>('JWT_ACCESS_TTL') ?? '15m');
-    this.refreshTtlMs = parseDurationMs(config.get<string>('JWT_REFRESH_TTL') ?? '7d');
+    this.accessTtlMs = parseDurationMs(
+      config.get<string>('JWT_ACCESS_TTL') ?? '15m',
+    );
+    this.refreshTtlMs = parseDurationMs(
+      config.get<string>('JWT_REFRESH_TTL') ?? '7d',
+    );
     this.frontUrl = config.get<string>('FRONT_URL') ?? 'http://localhost:3001';
   }
 
@@ -111,7 +115,9 @@ export class AuthService {
     const link = `${this.frontUrl}/verify-email?token=${token}`;
     if (!this.mail.configured) {
       // Dev fallback: surface the link in logs when no mailer is configured.
-      this.logger.warn(`Mailer disabled; verification link for ${email}: ${link}`);
+      this.logger.warn(
+        `Mailer disabled; verification link for ${email}: ${link}`,
+      );
       return;
     }
     try {

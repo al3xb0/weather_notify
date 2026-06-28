@@ -17,13 +17,15 @@ export class MetricsInterceptor implements NestInterceptor {
       return next.handle();
     }
     const http = context.switchToHttp();
-    const req = http.getRequest<Request & { route?: { path?: string } }>();
+    const req = http.getRequest<Request>();
     const stop = this.metrics.httpDuration.startTimer();
     const observe = () => {
       const res = http.getResponse<Response>();
+      const route =
+        (req.route as { path?: string } | undefined)?.path ?? req.path;
       stop({
         method: req.method,
-        route: req.route?.path ?? req.path,
+        route,
         status: res.statusCode,
       });
     };
