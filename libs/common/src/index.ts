@@ -7,3 +7,4 @@ export * from './quiet-hours';
 export * from './mail/mail.service';
 export * from './logging/logger.config';
 export * from './metrics/metrics';
+export * from './config/env';

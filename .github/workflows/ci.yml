@@ -26,8 +26,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://weather:weather@localhost:5432/weather_notify?schema=public
-      JWT_ACCESS_SECRET: ci-access-secret
-      JWT_REFRESH_SECRET: ci-refresh-secret
+      JWT_ACCESS_SECRET: ci-access-secret-0123456789-abcdefghij
+      JWT_REFRESH_SECRET: ci-refresh-secret-0123456789-abcdefghij
 
     steps:
       - uses: actions/checkout@v4
