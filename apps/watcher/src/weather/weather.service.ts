@@ -1,7 +1,7 @@
 import { HttpService } from '@nestjs/axios';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { firstValueFrom } from 'rxjs';
+import { firstValueFrom, retry } from 'rxjs';
 import { RedisService, WeatherSnapshot } from '@app/common';
 import { openMeteoResponseSchema } from './open-meteo.types';
 
@@ -41,10 +41,14 @@ export class WeatherService {
   }
 
   private async fetch(lat: number, lon: number): Promise<WeatherSnapshot> {
+    // Cap the call and retry once: a slow upstream must not stall the poll cycle.
     const { data } = await firstValueFrom(
-      this.http.get<unknown>(OPEN_METEO_URL, {
-        params: { latitude: lat, longitude: lon, current: CURRENT_FIELDS },
-      }),
+      this.http
+        .get<unknown>(OPEN_METEO_URL, {
+          params: { latitude: lat, longitude: lon, current: CURRENT_FIELDS },
+          timeout: 5000,
+        })
+        .pipe(retry({ count: 1, delay: 1000 })),
     );
     const c = openMeteoResponseSchema.parse(data).current;
     return {
