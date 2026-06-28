@@ -12,6 +12,7 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { TriggersModule } from './triggers/triggers.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { PinnedCitiesModule } from './pinned-cities/pinned-cities.module';
 import { MetricsModule } from './metrics/metrics.module';
 
 @Module({
@@ -27,6 +28,7 @@ import { MetricsModule } from './metrics/metrics.module';
     AuthModule,
     TriggersModule,
     NotificationsModule,
+    PinnedCitiesModule,
   ],
   controllers: [CoreApiController],
   providers: [CoreApiService, { provide: APP_GUARD, useClass: ThrottlerGuard }],

@@ -62,6 +62,7 @@ model User {
   pushSubs         PushSubscription[]
   notifications    Notification[]
   refreshTokens    RefreshToken[]
+  pinnedCities     PinnedCity[]
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 }
@@ -138,5 +139,21 @@ model RefreshToken {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
 
+  @@index([userId])
+}
+
+model PinnedCity {
+  id        String   @id @default(uuid())
+  userId    String
+  name      String
+  country   String?
+  admin1    String?
+  latitude  Float
+  longitude Float
+  order     Int      @default(0)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, latitude, longitude])
   @@index([userId])
 }
