@@ -1,26 +1,30 @@
-import { Trigger, TriggerState } from '@prisma/client';
+import { TriggerState } from '@prisma/client';
 import { WatcherService } from './watcher.service';
 
 jest.mock('@app/common', () => ({
-  evaluateCondition: jest.fn(),
+  evaluateConditions: jest.fn(),
   isWithinQuietHours: jest.fn(() => false),
   // Constructor type only; never instantiated under direct unit construction.
   RedisService: class {},
 }));
 
-import { evaluateCondition, isWithinQuietHours } from '@app/common';
+import { evaluateConditions, isWithinQuietHours } from '@app/common';
 
-const evalMock = evaluateCondition as jest.Mock;
+const evalMock = evaluateConditions as jest.Mock;
 const quietMock = isWithinQuietHours as jest.Mock;
 
 type Mocked = {
-  prisma: { trigger: { findMany: jest.Mock; update: jest.Mock } };
+  prisma: {
+    trigger: { findMany: jest.Mock; update: jest.Mock };
+    triggerCondition: { update: jest.Mock };
+    $transaction: jest.Mock;
+  };
   weather: { getSnapshot: jest.Mock };
   publisher: { publish: jest.Mock };
   redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
 };
 
-function makeTrigger(overrides: Partial<Trigger> = {}): Trigger {
+function makeTrigger(overrides: Record<string, unknown> = {}): never {
   return {
     id: 't1',
     userId: 'u1',
@@ -28,19 +32,45 @@ function makeTrigger(overrides: Partial<Trigger> = {}): Trigger {
     city: 'Berlin',
     latitude: 52.52,
     longitude: 13.405,
-    metric: 'TEMPERATURE',
-    operator: 'GT',
-    threshold: 30,
+    conditionLogic: 'AND',
+    conditions: [
+      {
+        id: 'c1',
+        triggerId: 't1',
+        metric: 'TEMPERATURE',
+        operator: 'GT',
+        threshold: 30,
+        order: 0,
+        lastObservedValue: null,
+        lastMatched: null,
+      },
+    ],
     channels: ['TELEGRAM'],
     cooldownMin: 30,
     isActive: true,
     state: TriggerState.ARMED,
     lastFiredAt: null,
+    lastEvaluatedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
-  } as Trigger;
+  } as never;
 }
+
+const RESULTS = [
+  {
+    id: 'c1',
+    triggerId: 't1',
+    metric: 'TEMPERATURE',
+    operator: 'GT',
+    threshold: 30,
+    order: 0,
+    lastObservedValue: null,
+    lastMatched: null,
+    observedValue: 35,
+    matched: true,
+  },
+];
 
 const SNAPSHOT = { temperature: 35 } as never;
 
@@ -51,7 +81,9 @@ describe('WatcherService', () => {
   beforeEach(() => {
     m = {
       prisma: {
-        trigger: { findMany: jest.fn(), update: jest.fn().mockResolvedValue({}) },
+        trigger: { findMany: jest.fn(), update: jest.fn().mockReturnValue({}) },
+        triggerCondition: { update: jest.fn().mockReturnValue({}) },
+        $transaction: jest.fn().mockResolvedValue([]),
       },
       weather: { getSnapshot: jest.fn().mockResolvedValue(SNAPSHOT) },
       publisher: { publish: jest.fn().mockResolvedValue(undefined) },
@@ -61,7 +93,7 @@ describe('WatcherService', () => {
       },
     };
     evalMock.mockReset();
-    evalMock.mockReturnValue({ matched: true, observedValue: 35 });
+    evalMock.mockReturnValue({ matched: true, results: RESULTS });
     quietMock.mockReset();
     quietMock.mockReturnValue(false);
 
@@ -102,7 +134,7 @@ describe('WatcherService', () => {
 
   describe('location grouping', () => {
     it('fetches weather once for co-located triggers', async () => {
-      evalMock.mockReturnValue({ matched: false, observedValue: 10 });
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
       m.prisma.trigger.findMany.mockResolvedValue([
         makeTrigger({ id: 'a', latitude: 52.521, longitude: 13.405 }),
         makeTrigger({ id: 'b', latitude: 52.524, longitude: 13.4049 }),
@@ -114,7 +146,7 @@ describe('WatcherService', () => {
     });
 
     it('fetches weather per distinct location', async () => {
-      evalMock.mockReturnValue({ matched: false, observedValue: 10 });
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
       m.prisma.trigger.findMany.mockResolvedValue([
         makeTrigger({ id: 'a', latitude: 52.52, longitude: 13.4 }),
         makeTrigger({ id: 'b', latitude: 48.13, longitude: 11.57 }),
@@ -124,7 +156,7 @@ describe('WatcherService', () => {
     });
 
     it('continues to other locations when one weather fetch fails', async () => {
-      evalMock.mockReturnValue({ matched: false, observedValue: 10 });
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
       m.weather.getSnapshot
         .mockRejectedValueOnce(new Error('upstream 500'))
         .mockResolvedValueOnce(SNAPSHOT);
@@ -134,27 +166,32 @@ describe('WatcherService', () => {
       ]);
       await service.runCycle();
       expect(m.weather.getSnapshot).toHaveBeenCalledTimes(2);
-      // The surviving location's trigger is still evaluated.
       expect(evalMock).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('firing state machine', () => {
-    async function process(trigger: Trigger): Promise<void> {
+    async function process(trigger: never): Promise<void> {
       m.prisma.trigger.findMany.mockResolvedValue([trigger]);
       await service.runCycle();
     }
 
+    const triggerUpdate = () => m.prisma.trigger.update.mock.calls[0][0];
+
     it('fires an ARMED trigger and transitions it to FIRED', async () => {
       await process(makeTrigger({ state: TriggerState.ARMED }));
       expect(m.publisher.publish).toHaveBeenCalledTimes(1);
-      const update = m.prisma.trigger.update.mock.calls[0][0];
+      const update = triggerUpdate();
       expect(update.where).toEqual({ id: 't1' });
       expect(update.data.state).toBe(TriggerState.FIRED);
       expect(update.data.lastFiredAt).toBeInstanceOf(Date);
+      expect(m.prisma.triggerCondition.update).toHaveBeenCalledWith({
+        where: { id: 'c1' },
+        data: { lastObservedValue: 35, lastMatched: true },
+      });
     });
 
-    it('records the observation but does not re-fire a FIRED trigger inside its cooldown', async () => {
+    it('records the observation but does not re-fire inside cooldown', async () => {
       await process(
         makeTrigger({
           state: TriggerState.FIRED,
@@ -163,10 +200,11 @@ describe('WatcherService', () => {
         }),
       );
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      const update = m.prisma.trigger.update.mock.calls[0][0];
-      expect(update.data).toMatchObject({ lastMatched: true, lastObservedValue: 35 });
+      const update = triggerUpdate();
       expect(update.data.state).toBeUndefined();
       expect(update.data.lastFiredAt).toBeUndefined();
+      expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
+      expect(m.prisma.triggerCondition.update).toHaveBeenCalledTimes(1);
     });
 
     it('re-fires a FIRED trigger once its cooldown has elapsed', async () => {
@@ -178,9 +216,7 @@ describe('WatcherService', () => {
         }),
       );
       expect(m.publisher.publish).toHaveBeenCalledTimes(1);
-      expect(m.prisma.trigger.update.mock.calls[0][0].data.state).toBe(
-        TriggerState.FIRED,
-      );
+      expect(triggerUpdate().data.state).toBe(TriggerState.FIRED);
     });
 
     it('fires a FIRED trigger that has no recorded lastFiredAt', async () => {
@@ -190,31 +226,24 @@ describe('WatcherService', () => {
       expect(m.publisher.publish).toHaveBeenCalledTimes(1);
     });
 
-    it('re-arms a FIRED trigger when the condition clears (hysteresis)', async () => {
-      evalMock.mockReturnValue({ matched: false, observedValue: 10 });
+    it('re-arms a FIRED trigger when the conditions clear (hysteresis)', async () => {
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
       await process(makeTrigger({ state: TriggerState.FIRED }));
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      const update = m.prisma.trigger.update.mock.calls[0][0];
+      const update = triggerUpdate();
       expect(update.where).toEqual({ id: 't1' });
-      expect(update.data).toMatchObject({
-        state: TriggerState.ARMED,
-        lastMatched: false,
-        lastObservedValue: 10,
-      });
+      expect(update.data.state).toBe(TriggerState.ARMED);
       expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
     });
 
-    it('records the observation for an unmatched ARMED trigger without changing state', async () => {
-      evalMock.mockReturnValue({ matched: false, observedValue: 10 });
+    it('records the observation for an unmatched ARMED trigger without firing', async () => {
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
       await process(makeTrigger({ state: TriggerState.ARMED }));
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      const update = m.prisma.trigger.update.mock.calls[0][0];
-      expect(update.data).toMatchObject({
-        lastMatched: false,
-        lastObservedValue: 10,
-      });
+      const update = triggerUpdate();
       expect(update.data.state).toBeUndefined();
       expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
+      expect(m.prisma.triggerCondition.update).toHaveBeenCalledTimes(1);
     });
 
     it('suppresses firing during quiet hours but records the observation', async () => {
@@ -227,12 +256,11 @@ describe('WatcherService', () => {
             quietHoursEnd: '07:00',
             timezone: 'UTC',
           },
-        } as never),
+        }),
       );
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      const update = m.prisma.trigger.update.mock.calls[0][0];
-      expect(update.data.state).toBeUndefined();
-      expect(update.data).toMatchObject({ lastMatched: true });
+      expect(triggerUpdate().data.state).toBeUndefined();
+      expect(m.prisma.triggerCondition.update).toHaveBeenCalledTimes(1);
     });
 
     it('fans the event out to every enabled channel', async () => {
@@ -248,9 +276,11 @@ describe('WatcherService', () => {
       const event = m.publisher.publish.mock.calls[0][1];
       expect(event).toMatchObject({
         triggerId: 't1',
-        observedValue: 35,
-        threshold: 30,
+        conditionLogic: 'AND',
         channels: ['TELEGRAM', 'EMAIL'],
+        conditions: [
+          { metric: 'TEMPERATURE', operator: 'GT', threshold: 30, observedValue: 35 },
+        ],
       });
       expect(event.eventId).toEqual(expect.any(String));
     });

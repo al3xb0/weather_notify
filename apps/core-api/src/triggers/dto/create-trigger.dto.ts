@@ -1,4 +1,6 @@
+import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
@@ -10,8 +12,20 @@ import {
   Length,
   Max,
   Min,
+  ValidateNested,
 } from 'class-validator';
-import { Channel, Metric, Operator } from '@app/contracts';
+import { Channel, ConditionLogic, Metric, Operator } from '@app/contracts';
+
+export class ConditionDto {
+  @IsEnum(Metric)
+  metric!: Metric;
+
+  @IsEnum(Operator)
+  operator!: Operator;
+
+  @IsNumber()
+  threshold!: number;
+}
 
 export class CreateTriggerDto {
   @IsString()
@@ -32,14 +46,16 @@ export class CreateTriggerDto {
   @Max(180)
   longitude!: number;
 
-  @IsEnum(Metric)
-  metric!: Metric;
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(5)
+  @ValidateNested({ each: true })
+  @Type(() => ConditionDto)
+  conditions!: ConditionDto[];
 
-  @IsEnum(Operator)
-  operator!: Operator;
-
-  @IsNumber()
-  threshold!: number;
+  @IsOptional()
+  @IsEnum(ConditionLogic)
+  conditionLogic?: ConditionLogic;
 
   @IsArray()
   @ArrayNotEmpty()

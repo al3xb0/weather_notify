@@ -1,6 +1,7 @@
-import { Metric, Operator } from '@prisma/client';
+import { ConditionLogic, Metric, Operator } from '@prisma/client';
 import {
   evaluateCondition,
+  evaluateConditions,
   isSevereWeatherCode,
   WeatherSnapshot,
 } from './condition';
@@ -81,6 +82,68 @@ describe('evaluateCondition', () => {
       expect(
         evaluateCondition(snapshot, Metric.SEVERE, Operator.EQ, 0).matched,
       ).toBe(false);
+    });
+  });
+});
+
+describe('evaluateConditions', () => {
+  const c = (metric: Metric, operator: Operator, threshold: number) => ({
+    metric,
+    operator,
+    threshold,
+  });
+
+  it('AND matches only when every condition matches', () => {
+    const conds = [
+      c(Metric.TEMPERATURE, Operator.GT, 30),
+      c(Metric.HUMIDITY, Operator.GTE, 80),
+    ];
+    expect(evaluateConditions(snapshot, conds, ConditionLogic.AND).matched).toBe(
+      true,
+    );
+    const failing = [
+      c(Metric.TEMPERATURE, Operator.GT, 30),
+      c(Metric.HUMIDITY, Operator.GT, 90),
+    ];
+    expect(
+      evaluateConditions(snapshot, failing, ConditionLogic.AND).matched,
+    ).toBe(false);
+  });
+
+  it('OR matches when at least one condition matches', () => {
+    const conds = [
+      c(Metric.TEMPERATURE, Operator.LT, 0),
+      c(Metric.HUMIDITY, Operator.GTE, 80),
+    ];
+    expect(evaluateConditions(snapshot, conds, ConditionLogic.OR).matched).toBe(
+      true,
+    );
+    const none = [
+      c(Metric.TEMPERATURE, Operator.LT, 0),
+      c(Metric.HUMIDITY, Operator.GT, 90),
+    ];
+    expect(evaluateConditions(snapshot, none, ConditionLogic.OR).matched).toBe(
+      false,
+    );
+  });
+
+  it('never matches an empty condition list', () => {
+    expect(evaluateConditions(snapshot, [], ConditionLogic.AND).matched).toBe(
+      false,
+    );
+    expect(evaluateConditions(snapshot, [], ConditionLogic.OR).matched).toBe(
+      false,
+    );
+  });
+
+  it('preserves extra properties and per-condition results', () => {
+    const conds = [{ ...c(Metric.SEVERE, Operator.EQ, 0), id: 'x' }];
+    const stormy = { ...snapshot, weatherCode: 95 };
+    const { results } = evaluateConditions(stormy, conds, ConditionLogic.AND);
+    expect(results[0]).toMatchObject({
+      id: 'x',
+      matched: true,
+      observedValue: 95,
     });
   });
 });

@@ -10,11 +10,11 @@ const TRIGGER = {
   userId: 'u1',
   name: 'Heat',
   city: 'Berlin',
-  metric: 'TEMPERATURE',
-  operator: 'GT',
-  threshold: 30,
+  conditionLogic: 'AND',
+  conditions: [
+    { metric: 'TEMPERATURE', operator: 'GT', threshold: 30, lastObservedValue: 27 },
+  ],
   channels: ['TELEGRAM', 'EMAIL'],
-  lastObservedValue: 27,
 };
 
 describe('TriggersService', () => {
@@ -41,7 +41,10 @@ describe('TriggersService', () => {
   });
 
   describe('create soft-gate', () => {
-    const dto = { name: 'X' } as never;
+    const dto = {
+      name: 'X',
+      conditions: [{ metric: 'TEMPERATURE', operator: 'GT', threshold: 30 }],
+    } as never;
 
     it('rejects creation when the email is not verified', async () => {
       prisma.user.findUnique.mockResolvedValue({ emailVerified: false });
@@ -67,17 +70,22 @@ describe('TriggersService', () => {
     expect(event).toMatchObject({
       triggerId: 't1',
       test: true,
-      observedValue: 27,
+      conditionLogic: 'AND',
+      conditions: [{ observedValue: 27 }],
     });
   });
 
   it('falls back to the threshold when no observation is recorded yet', async () => {
     prisma.trigger.findFirst.mockResolvedValue({
       ...TRIGGER,
-      lastObservedValue: null,
+      conditions: [
+        { metric: 'TEMPERATURE', operator: 'GT', threshold: 30, lastObservedValue: null },
+      ],
     });
     await service.sendTest('u1', 't1');
-    expect(publisher.publish.mock.calls[0][1].observedValue).toBe(30);
+    expect(publisher.publish.mock.calls[0][1].conditions[0].observedValue).toBe(
+      30,
+    );
   });
 
   it('throws NotFound for a trigger the user does not own', async () => {

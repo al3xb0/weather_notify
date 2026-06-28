@@ -1,4 +1,4 @@
-import { Metric, Operator } from '@prisma/client';
+import { ConditionLogic, Metric, Operator } from '@prisma/client';
 
 export interface WeatherSnapshot {
   temperature: number;
@@ -82,4 +82,48 @@ export function evaluateCondition(
     matched: compare(observedValue, operator, threshold),
     observedValue,
   };
+}
+
+export interface ConditionSpec {
+  metric: Metric;
+  operator: Operator;
+  threshold: number;
+}
+
+export type EvaluatedCondition<T extends ConditionSpec> = T & {
+  matched: boolean;
+  observedValue: number;
+};
+
+export interface ConditionsResult<T extends ConditionSpec> {
+  matched: boolean;
+  results: EvaluatedCondition<T>[];
+}
+
+/**
+ * Evaluate several conditions against a snapshot and combine them with AND/OR.
+ * Each input condition is returned enriched with its own matched/observedValue
+ * (extra properties like `id` are preserved). An empty list never matches.
+ */
+export function evaluateConditions<T extends ConditionSpec>(
+  snapshot: WeatherSnapshot,
+  conditions: T[],
+  logic: ConditionLogic,
+): ConditionsResult<T> {
+  const results = conditions.map((c) => {
+    const { matched, observedValue } = evaluateCondition(
+      snapshot,
+      c.metric,
+      c.operator,
+      c.threshold,
+    );
+    return { ...c, matched, observedValue };
+  });
+  const matched =
+    conditions.length === 0
+      ? false
+      : logic === ConditionLogic.OR
+        ? results.some((r) => r.matched)
+        : results.every((r) => r.matched);
+  return { matched, results };
 }

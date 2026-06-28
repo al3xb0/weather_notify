@@ -35,6 +35,11 @@ enum TriggerState {
   FIRED
 }
 
+enum ConditionLogic {
+  AND
+  OR
+}
+
 enum NotifStatus {
   SENT
   FAILED
@@ -68,23 +73,34 @@ model Trigger {
   city        String
   latitude    Float
   longitude   Float
-  metric      Metric
-  operator    Operator
-  threshold   Float
+  conditionLogic ConditionLogic @default(AND)
+  conditions  TriggerCondition[]
   channels    Channel[]
   cooldownMin Int          @default(60)
   isActive    Boolean      @default(true)
   state       TriggerState @default(ARMED)
   lastFiredAt DateTime?
-  lastObservedValue Float?
   lastEvaluatedAt   DateTime?
-  lastMatched       Boolean?
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
   @@index([isActive, latitude, longitude])
   @@index([userId])
+}
+
+model TriggerCondition {
+  id        String   @id @default(uuid())
+  triggerId String
+  metric    Metric
+  operator  Operator
+  threshold Float
+  order     Int      @default(0)
+  lastObservedValue Float?
+  lastMatched       Boolean?
+  trigger   Trigger  @relation(fields: [triggerId], references: [id], onDelete: Cascade)
+
+  @@index([triggerId])
 }
 
 model Notification {

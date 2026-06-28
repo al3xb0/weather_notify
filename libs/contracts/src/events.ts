@@ -1,8 +1,16 @@
-import { Channel, Metric, Operator } from '@prisma/client';
+import { Channel, ConditionLogic, Metric, Operator } from '@prisma/client';
+
+/** A single evaluated condition carried in a fired event. */
+export interface FiredCondition {
+  metric: Metric;
+  operator: Operator;
+  threshold: number;
+  observedValue: number;
+}
 
 /**
- * Event published by the watcher to RabbitMQ when a trigger's condition is met.
- * Consumed by the notifier, fanned out to the enabled channels.
+ * Event published by the watcher to RabbitMQ when a trigger's conditions are
+ * met. Consumed by the notifier, fanned out to the enabled channels.
  */
 export interface TriggerFiredEvent {
   eventId: string;
@@ -10,10 +18,8 @@ export interface TriggerFiredEvent {
   userId: string;
   triggerName: string;
   city: string;
-  metric: Metric;
-  operator: Operator;
-  threshold: number;
-  observedValue: number;
+  conditions: FiredCondition[];
+  conditionLogic: ConditionLogic;
   channels: Channel[];
   firedAt: string;
   /** True when published by the user-initiated "send test" action. */

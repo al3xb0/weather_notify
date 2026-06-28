@@ -1,10 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
-import { Trigger, TriggerState } from '@prisma/client';
+import { Prisma, Trigger, TriggerCondition, TriggerState } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import {
-  evaluateCondition,
+  evaluateConditions,
   isWithinQuietHours,
   RabbitPublisherService,
   RedisService,
@@ -22,8 +22,15 @@ type QuietHoursUser = {
   quietHoursEnd: string | null;
   timezone: string | null;
 };
-// The user's quiet-hours window is joined onto each trigger for the cycle.
-type WatchedTrigger = Trigger & { user?: QuietHoursUser };
+// Conditions and the user's quiet-hours window are joined onto each trigger.
+type WatchedTrigger = Trigger & {
+  conditions: TriggerCondition[];
+  user?: QuietHoursUser;
+};
+type EvaluatedCondition = TriggerCondition & {
+  matched: boolean;
+  observedValue: number;
+};
 
 @Injectable()
 export class WatcherService {
@@ -65,6 +72,7 @@ export class WatcherService {
     const triggers = await this.prisma.trigger.findMany({
       where: { isActive: true },
       include: {
+        conditions: { orderBy: { order: 'asc' } },
         user: {
           select: {
             quietHoursStart: true,
@@ -120,49 +128,38 @@ export class WatcherService {
     trigger: WatchedTrigger,
     snapshot: WeatherSnapshot,
   ): Promise<void> {
-    const { matched, observedValue } = evaluateCondition(
+    const { matched, results } = evaluateConditions(
       snapshot,
-      trigger.metric,
-      trigger.operator,
-      trigger.threshold,
+      trigger.conditions,
+      trigger.conditionLogic,
     );
-
-    // Recorded on every evaluation so the UI can show the current value and
-    // explain why a trigger is (not) firing. Merged into whatever state write
-    // the cycle already needs to avoid a second query per trigger.
-    const observation = {
-      lastObservedValue: observedValue,
-      lastEvaluatedAt: new Date(),
-      lastMatched: matched,
-    };
+    const evaluatedAt = new Date();
 
     if (!matched) {
       // Re-arm so the next crossing fires again (hysteresis).
-      await this.prisma.trigger.update({
-        where: { id: trigger.id },
-        data:
-          trigger.state === TriggerState.FIRED
-            ? { ...observation, state: TriggerState.ARMED }
-            : observation,
-      });
+      await this.writeObservation(
+        trigger.id,
+        results,
+        trigger.state === TriggerState.FIRED
+          ? { lastEvaluatedAt: evaluatedAt, state: TriggerState.ARMED }
+          : { lastEvaluatedAt: evaluatedAt },
+      );
       return;
     }
 
     if (!this.shouldFire(trigger)) {
       // Matched but suppressed by cooldown — still record the observation.
-      await this.prisma.trigger.update({
-        where: { id: trigger.id },
-        data: observation,
+      await this.writeObservation(trigger.id, results, {
+        lastEvaluatedAt: evaluatedAt,
       });
       return;
     }
 
     if (this.isQuietHours(trigger)) {
       // Suppress delivery during quiet hours; stay ARMED so it can still fire
-      // once the window passes if the condition holds.
-      await this.prisma.trigger.update({
-        where: { id: trigger.id },
-        data: observation,
+      // once the window passes if the conditions hold.
+      await this.writeObservation(trigger.id, results, {
+        lastEvaluatedAt: evaluatedAt,
       });
       this.logger.log(
         `Trigger "${trigger.name}" (${trigger.id}) matched during quiet hours — suppressed`,
@@ -170,7 +167,30 @@ export class WatcherService {
       return;
     }
 
-    await this.fire(trigger, observedValue, observation);
+    await this.fire(trigger, results, evaluatedAt);
+  }
+
+  /**
+   * Persist per-condition observations plus any trigger-level state change in a
+   * single transaction. Write volume is small (≤20 triggers, few conditions).
+   */
+  private async writeObservation(
+    triggerId: string,
+    results: EvaluatedCondition[],
+    triggerData: Prisma.TriggerUpdateInput,
+  ): Promise<void> {
+    await this.prisma.$transaction([
+      ...results.map((r) =>
+        this.prisma.triggerCondition.update({
+          where: { id: r.id },
+          data: { lastObservedValue: r.observedValue, lastMatched: r.matched },
+        }),
+      ),
+      this.prisma.trigger.update({
+        where: { id: triggerId },
+        data: triggerData,
+      }),
+    ]);
   }
 
   private isQuietHours(trigger: WatchedTrigger): boolean {
@@ -198,13 +218,9 @@ export class WatcherService {
   }
 
   private async fire(
-    trigger: Trigger,
-    observedValue: number,
-    observation: {
-      lastObservedValue: number;
-      lastEvaluatedAt: Date;
-      lastMatched: boolean;
-    },
+    trigger: WatchedTrigger,
+    results: EvaluatedCondition[],
+    evaluatedAt: Date,
   ): Promise<void> {
     const event: TriggerFiredEvent = {
       eventId: randomUUID(),
@@ -212,10 +228,13 @@ export class WatcherService {
       userId: trigger.userId,
       triggerName: trigger.name,
       city: trigger.city,
-      metric: trigger.metric,
-      operator: trigger.operator,
-      threshold: trigger.threshold,
-      observedValue,
+      conditions: results.map((r) => ({
+        metric: r.metric,
+        operator: r.operator,
+        threshold: r.threshold,
+        observedValue: r.observedValue,
+      })),
+      conditionLogic: trigger.conditionLogic,
       channels: trigger.channels,
       firedAt: new Date().toISOString(),
     };
@@ -224,13 +243,12 @@ export class WatcherService {
       await this.publisher.publish(routingKeyFor(channel), event);
     }
 
-    await this.prisma.trigger.update({
-      where: { id: trigger.id },
-      data: { ...observation, state: TriggerState.FIRED, lastFiredAt: new Date() },
+    await this.writeObservation(trigger.id, results, {
+      lastEvaluatedAt: evaluatedAt,
+      state: TriggerState.FIRED,
+      lastFiredAt: new Date(),
     });
 
-    this.logger.log(
-      `Trigger "${trigger.name}" (${trigger.id}) fired: observed ${observedValue}`,
-    );
+    this.logger.log(`Trigger "${trigger.name}" (${trigger.id}) fired`);
   }
 }

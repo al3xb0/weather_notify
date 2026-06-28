@@ -1,4 +1,4 @@
-import { Metric, Operator, TriggerFiredEvent } from '@app/contracts';
+import { FiredCondition, Metric, Operator, TriggerFiredEvent } from '@app/contracts';
 
 const METRIC_LABEL: Record<Metric, string> = {
   TEMPERATURE: 'Temperature',
@@ -21,18 +21,24 @@ function testPrefix(event: TriggerFiredEvent): string {
   return event.test ? '[TEST] ' : '';
 }
 
+function describeCondition(c: FiredCondition): string {
+  if (c.metric === 'SEVERE') {
+    return `severe weather (WMO ${c.observedValue})`;
+  }
+  const metric = METRIC_LABEL[c.metric];
+  const op = OPERATOR_LABEL[c.operator];
+  return `${metric} ${c.observedValue} (${op} ${c.threshold})`;
+}
+
 export function alertTitle(event: TriggerFiredEvent): string {
   return `${testPrefix(event)}Weather alert: ${event.triggerName} (${event.city})`;
 }
 
 export function alertText(event: TriggerFiredEvent): string {
   const prefix = testPrefix(event);
-  if (event.metric === 'SEVERE') {
-    return `${prefix}Severe weather detected in ${event.city} (WMO code ${event.observedValue}).`;
-  }
-  const metric = METRIC_LABEL[event.metric];
-  const op = OPERATOR_LABEL[event.operator];
-  return `${prefix}${metric} in ${event.city} is ${event.observedValue} (condition: ${metric} ${op} ${event.threshold}).`;
+  const joiner = event.conditionLogic === 'OR' ? ' or ' : ' and ';
+  const parts = event.conditions.map(describeCondition).join(joiner);
+  return `${prefix}In ${event.city}: ${parts}.`;
 }
 
 export function alertHtml(event: TriggerFiredEvent): string {

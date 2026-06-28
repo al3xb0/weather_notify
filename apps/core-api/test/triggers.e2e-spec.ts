@@ -17,9 +17,8 @@ describe('Triggers CRUD (e2e)', () => {
     city: 'Berlin',
     latitude: 52.52,
     longitude: 13.405,
-    metric: 'TEMPERATURE',
-    operator: 'GT',
-    threshold: 30,
+    conditions: [{ metric: 'TEMPERATURE', operator: 'GT', threshold: 30 }],
+    conditionLogic: 'AND',
     channels: ['TELEGRAM', 'EMAIL'],
     cooldownMin: 30,
   };
@@ -40,6 +39,11 @@ describe('Triggers CRUD (e2e)', () => {
       .post('/auth/register')
       .send({ email, password });
     token = res.body.accessToken;
+    // Soft-gate: triggers require a verified email, so confirm it directly.
+    await prisma.user.update({
+      where: { email },
+      data: { emailVerified: true },
+    });
   });
 
   afterAll(async () => {
@@ -57,7 +61,10 @@ describe('Triggers CRUD (e2e)', () => {
     return request(app.getHttpServer())
       .post('/triggers')
       .set('Authorization', `Bearer ${token}`)
-      .send({ ...payload, metric: 'NOPE', channels: [] })
+      .send({
+        ...payload,
+        conditions: [{ metric: 'NOPE', operator: 'GT', threshold: 30 }],
+      })
       .expect(400);
   });
 
@@ -94,10 +101,13 @@ describe('Triggers CRUD (e2e)', () => {
     return request(app.getHttpServer())
       .patch(`/triggers/${triggerId}`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ threshold: 35, isActive: false })
+      .send({
+        conditions: [{ metric: 'TEMPERATURE', operator: 'GTE', threshold: 35 }],
+        isActive: false,
+      })
       .expect(200)
       .expect((res) => {
-        expect(res.body.threshold).toBe(35);
+        expect(res.body.conditions[0].threshold).toBe(35);
         expect(res.body.isActive).toBe(false);
       });
   });

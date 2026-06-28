@@ -13,10 +13,10 @@ const event: TriggerFiredEvent = {
   userId: 'u1',
   triggerName: 'Heat',
   city: 'Berlin',
-  metric: 'TEMPERATURE',
-  operator: 'GT',
-  threshold: 30,
-  observedValue: 35,
+  conditions: [
+    { metric: 'TEMPERATURE', operator: 'GT', threshold: 30, observedValue: 35 },
+  ],
+  conditionLogic: 'AND',
   channels: ['EMAIL'],
   firedAt: new Date().toISOString(),
 };
