@@ -45,11 +45,14 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+
       - name: Build all apps
         run: npm run build:all
 
       - name: Unit tests
-        run: npm test
+        run: npm run test:cov
 
       - name: E2E tests
         run: npm run test:e2e
