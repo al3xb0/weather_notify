@@ -4,3 +4,4 @@ export * from './redis/redis.module';
 export * from './health/health-server';
 export * from './messaging/rabbit-publisher.service';
 export * from './quiet-hours';
+export * from './mail/mail.service';

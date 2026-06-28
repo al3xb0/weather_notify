@@ -50,6 +50,9 @@ model User {
   quietHoursStart  String?
   quietHoursEnd    String?
   timezone         String?
+  emailVerified    Boolean            @default(false)
+  emailVerificationToken String?      @unique
+  emailVerificationTokenExpiresAt DateTime?
   triggers         Trigger[]
   pushSubs         PushSubscription[]
   notifications    Notification[]

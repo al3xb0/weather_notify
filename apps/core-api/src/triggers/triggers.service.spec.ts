@@ -17,15 +17,44 @@ const TRIGGER = {
   lastObservedValue: 27,
 };
 
-describe('TriggersService.sendTest', () => {
-  let prisma: { trigger: { findFirst: jest.Mock } };
+describe('TriggersService', () => {
+  let prisma: {
+    trigger: { findFirst: jest.Mock; count: jest.Mock; create: jest.Mock };
+    user: { findUnique: jest.Mock };
+  };
   let publisher: { publish: jest.Mock };
   let service: TriggersService;
 
   beforeEach(() => {
-    prisma = { trigger: { findFirst: jest.fn().mockResolvedValue(TRIGGER) } };
+    prisma = {
+      trigger: {
+        findFirst: jest.fn().mockResolvedValue(TRIGGER),
+        count: jest.fn().mockResolvedValue(0),
+        create: jest.fn().mockResolvedValue({ id: 'new' }),
+      },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({ emailVerified: true }),
+      },
+    };
     publisher = { publish: jest.fn().mockResolvedValue(undefined) };
     service = new TriggersService(prisma as never, publisher as never);
+  });
+
+  describe('create soft-gate', () => {
+    const dto = { name: 'X' } as never;
+
+    it('rejects creation when the email is not verified', async () => {
+      prisma.user.findUnique.mockResolvedValue({ emailVerified: false });
+      await expect(service.create('u1', dto)).rejects.toThrow(
+        'verify your email',
+      );
+      expect(prisma.trigger.create).not.toHaveBeenCalled();
+    });
+
+    it('creates the trigger for a verified user', async () => {
+      await service.create('u1', dto);
+      expect(prisma.trigger.create).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('publishes a flagged test event to every channel', async () => {

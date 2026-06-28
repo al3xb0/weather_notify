@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { HttpModule } from '@nestjs/axios';
 import { DatabaseModule } from '@app/database';
+import { MailService } from '@app/common';
 import { NotifierService } from './notifier.service';
 import { RabbitConsumerService } from './messaging/rabbit-consumer.service';
 import { TelegramChannel } from './channels/telegram.channel';
@@ -20,6 +21,7 @@ import { WebPushChannel } from './channels/webpush.channel';
     TelegramChannel,
     EmailChannel,
     WebPushChannel,
+    MailService,
   ],
 })
 export class NotifierModule {}

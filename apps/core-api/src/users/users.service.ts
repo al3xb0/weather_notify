@@ -19,6 +19,7 @@ export interface UserProfile {
   email: string;
   telegramChatId: string | null;
   telegramLinked: boolean;
+  emailVerified: boolean;
   quietHoursStart: string | null;
   quietHoursEnd: string | null;
   timezone: string | null;
@@ -51,6 +52,7 @@ export class UsersService {
       email: user.email,
       telegramChatId: user.telegramChatId,
       telegramLinked: Boolean(user.telegramChatId),
+      emailVerified: user.emailVerified,
       quietHoursStart: user.quietHoursStart,
       quietHoursEnd: user.quietHoursEnd,
       timezone: user.timezone,

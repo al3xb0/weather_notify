@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -7,14 +8,17 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { JwtService } from '@nestjs/jwt';
+import { randomUUID } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
+import { MailService } from '@app/common';
 import { UsersService } from '../users/users.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshPayload, Tokens } from './types';
 
 const BCRYPT_ROUNDS = 12;
+const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class AuthService {
@@ -23,11 +27,13 @@ export class AuthService {
   private readonly accessTtlMs: number;
   private readonly refreshSecret: string;
   readonly refreshTtlMs: number;
+  private readonly frontUrl: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly users: UsersService,
     private readonly jwt: JwtService,
+    private readonly mail: MailService,
     config: ConfigService,
   ) {
     this.accessSecret = config.getOrThrow<string>('JWT_ACCESS_SECRET');
@@ -35,6 +41,7 @@ export class AuthService {
     // Parse at boot so a malformed TTL fails fast instead of silently widening.
     this.accessTtlMs = parseDurationMs(config.get<string>('JWT_ACCESS_TTL') ?? '15m');
     this.refreshTtlMs = parseDurationMs(config.get<string>('JWT_REFRESH_TTL') ?? '7d');
+    this.frontUrl = config.get<string>('FRONT_URL') ?? 'http://localhost:3001';
   }
 
   async register(dto: RegisterDto): Promise<Tokens> {
@@ -45,7 +52,77 @@ export class AuthService {
     }
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     const user = await this.users.create(dto.email, passwordHash);
+    // Soft-gate: the account is usable immediately; email is verified later.
+    await this.sendVerificationEmail(user.id, user.email);
     return this.issueTokens(user.id, user.email);
+  }
+
+  /** Confirm an email-verification token (idempotent for unknown tokens). */
+  async verifyEmail(token: string): Promise<{ verified: boolean }> {
+    const user = await this.prisma.user.findUnique({
+      where: { emailVerificationToken: token },
+    });
+    if (
+      !user ||
+      !user.emailVerificationTokenExpiresAt ||
+      user.emailVerificationTokenExpiresAt < new Date()
+    ) {
+      throw new BadRequestException('Invalid or expired verification token');
+    }
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerified: true,
+        emailVerificationToken: null,
+        emailVerificationTokenExpiresAt: null,
+      },
+    });
+    return { verified: true };
+  }
+
+  /** Re-issue a verification email for the authenticated user. */
+  async resendVerification(userId: string): Promise<{ sent: boolean }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+    if (user.emailVerified) {
+      return { sent: false };
+    }
+    await this.sendVerificationEmail(user.id, user.email);
+    return { sent: true };
+  }
+
+  private async sendVerificationEmail(
+    userId: string,
+    email: string,
+  ): Promise<void> {
+    const token = randomUUID();
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        emailVerificationToken: token,
+        emailVerificationTokenExpiresAt: new Date(Date.now() + VERIFY_TTL_MS),
+      },
+    });
+    const link = `${this.frontUrl}/verify-email?token=${token}`;
+    if (!this.mail.configured) {
+      // Dev fallback: surface the link in logs when no mailer is configured.
+      this.logger.warn(`Mailer disabled; verification link for ${email}: ${link}`);
+      return;
+    }
+    try {
+      await this.mail.send({
+        to: email,
+        subject: 'Verify your email',
+        html: `<p>Confirm your email address by clicking <a href="${link}">this link</a>. It expires in 24 hours.</p>`,
+      });
+    } catch (err) {
+      // Never block registration on a mailer hiccup — soft gate.
+      this.logger.error(
+        `Failed to send verification email to ${email}: ${String(err)}`,
+      );
+    }
   }
 
   async login(dto: LoginDto): Promise<Tokens> {

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -22,6 +23,16 @@ export class TriggersService {
   ) {}
 
   async create(userId: string, dto: CreateTriggerDto): Promise<Trigger> {
+    // Soft-gate: only verified users can arm alerts.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { emailVerified: true },
+    });
+    if (!user?.emailVerified) {
+      throw new ForbiddenException(
+        'Please verify your email before creating triggers',
+      );
+    }
     const count = await this.prisma.trigger.count({ where: { userId } });
     if (count >= MAX_TRIGGERS_PER_USER) {
       throw new BadRequestException(
