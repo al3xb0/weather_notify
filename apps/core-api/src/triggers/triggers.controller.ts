@@ -53,4 +53,9 @@ export class TriggersController {
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.triggers.remove(user.userId, id);
   }
+
+  @Post(':id/test')
+  test(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.triggers.sendTest(user.userId, id);
+  }
 }

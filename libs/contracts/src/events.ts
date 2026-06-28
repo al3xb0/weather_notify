@@ -16,4 +16,6 @@ export interface TriggerFiredEvent {
   observedValue: number;
   channels: Channel[];
   firedAt: string;
+  /** True when published by the user-initiated "send test" action. */
+  test?: boolean;
 }

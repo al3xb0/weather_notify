@@ -3,10 +3,14 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
 import { Trigger, TriggerState } from '@prisma/client';
 import { PrismaService } from '@app/database';
-import { evaluateCondition, RedisService, WeatherSnapshot } from '@app/common';
+import {
+  evaluateCondition,
+  RabbitPublisherService,
+  RedisService,
+  WeatherSnapshot,
+} from '@app/common';
 import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
 import { WeatherService } from './weather/weather.service';
-import { RabbitPublisherService } from './messaging/rabbit-publisher.service';
 
 const CYCLE_LOCK_KEY = 'watcher:cycle:lock';
 // Auto-expires if a cycle crashes without releasing; longer than any sane run.

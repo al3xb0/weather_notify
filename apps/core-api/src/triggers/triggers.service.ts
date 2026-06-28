@@ -3,8 +3,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Trigger } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { Channel, Prisma, Trigger } from '@prisma/client';
 import { PrismaService } from '@app/database';
+import { RabbitPublisherService } from '@app/common';
+import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
 import { CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
@@ -13,7 +16,10 @@ const MAX_TRIGGERS_PER_USER = 20;
 
 @Injectable()
 export class TriggersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly publisher: RabbitPublisherService,
+  ) {}
 
   async create(userId: string, dto: CreateTriggerDto): Promise<Trigger> {
     const count = await this.prisma.trigger.count({ where: { userId } });
@@ -67,5 +73,31 @@ export class TriggersService {
     await this.findOne(userId, id);
     await this.prisma.trigger.delete({ where: { id } });
     return { id };
+  }
+
+  /**
+   * Publish a test event for the trigger through its configured channels. Runs
+   * the normal notifier path (retry/DLQ + history) but flagged as a test.
+   */
+  async sendTest(userId: string, id: string): Promise<{ sent: Channel[] }> {
+    const trigger = await this.findOne(userId, id);
+    const event: TriggerFiredEvent = {
+      eventId: randomUUID(),
+      triggerId: trigger.id,
+      userId: trigger.userId,
+      triggerName: trigger.name,
+      city: trigger.city,
+      metric: trigger.metric,
+      operator: trigger.operator,
+      threshold: trigger.threshold,
+      observedValue: trigger.lastObservedValue ?? trigger.threshold,
+      channels: trigger.channels,
+      firedAt: new Date().toISOString(),
+      test: true,
+    };
+    for (const channel of trigger.channels) {
+      await this.publisher.publish(routingKeyFor(channel), event);
+    }
+    return { sent: trigger.channels };
   }
 }

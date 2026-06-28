@@ -17,17 +17,22 @@ const OPERATOR_LABEL: Record<Operator, string> = {
   EQ: '=',
 };
 
+function testPrefix(event: TriggerFiredEvent): string {
+  return event.test ? '[TEST] ' : '';
+}
+
 export function alertTitle(event: TriggerFiredEvent): string {
-  return `Weather alert: ${event.triggerName} (${event.city})`;
+  return `${testPrefix(event)}Weather alert: ${event.triggerName} (${event.city})`;
 }
 
 export function alertText(event: TriggerFiredEvent): string {
+  const prefix = testPrefix(event);
   if (event.metric === 'SEVERE') {
-    return `Severe weather detected in ${event.city} (WMO code ${event.observedValue}).`;
+    return `${prefix}Severe weather detected in ${event.city} (WMO code ${event.observedValue}).`;
   }
   const metric = METRIC_LABEL[event.metric];
   const op = OPERATOR_LABEL[event.operator];
-  return `${metric} in ${event.city} is ${event.observedValue} (condition: ${metric} ${op} ${event.threshold}).`;
+  return `${prefix}${metric} in ${event.city} is ${event.observedValue} (condition: ${metric} ${op} ${event.threshold}).`;
 }
 
 export function alertHtml(event: TriggerFiredEvent): string {
