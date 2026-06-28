@@ -1,11 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
+import { getCounter } from '@app/common';
 import { Channel, NotifStatus, TriggerFiredEvent } from '@app/contracts';
 import { NotificationChannel } from './channels/channel.types';
 import { TelegramChannel } from './channels/telegram.channel';
 import { EmailChannel } from './channels/email.channel';
 import { WebPushChannel } from './channels/webpush.channel';
+
+const notificationsTotal = getCounter(
+  'notifier_notifications_total',
+  'Total notifications logged by channel and status',
+  ['channel', 'status'],
+);
 
 @Injectable()
 export class NotifierService {
@@ -46,5 +53,6 @@ export class NotifierService {
         error: error ?? null,
       },
     });
+    notificationsTotal.inc({ channel, status });
   }
 }

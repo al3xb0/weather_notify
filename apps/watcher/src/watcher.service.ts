@@ -5,6 +5,8 @@ import { Prisma, Trigger, TriggerCondition, TriggerState } from '@prisma/client'
 import { PrismaService } from '@app/database';
 import {
   evaluateConditions,
+  getCounter,
+  getHistogram,
   isWithinQuietHours,
   RabbitPublisherService,
   RedisService,
@@ -16,6 +18,19 @@ import { WeatherService } from './weather/weather.service';
 const CYCLE_LOCK_KEY = 'watcher:cycle:lock';
 // Auto-expires if a cycle crashes without releasing; longer than any sane run.
 const CYCLE_LOCK_TTL_SEC = 600;
+
+const cycleDuration = getHistogram(
+  'watcher_cycle_duration_seconds',
+  'Duration of a watcher poll cycle in seconds',
+);
+const triggersEvaluated = getCounter(
+  'watcher_triggers_evaluated_total',
+  'Total number of trigger evaluations',
+);
+const triggersFired = getCounter(
+  'watcher_triggers_fired_total',
+  'Total number of triggers fired',
+);
 
 type QuietHoursUser = {
   quietHoursStart: string | null;
@@ -56,9 +71,11 @@ export class WatcherService {
       this.logger.warn('Previous cycle still running — skipping this tick');
       return;
     }
+    const endTimer = cycleDuration.startTimer();
     try {
       await this.poll();
     } finally {
+      endTimer();
       const released = await this.redis.releaseLock(CYCLE_LOCK_KEY, token);
       if (!released) {
         this.logger.warn(
@@ -128,6 +145,7 @@ export class WatcherService {
     trigger: WatchedTrigger,
     snapshot: WeatherSnapshot,
   ): Promise<void> {
+    triggersEvaluated.inc();
     const { matched, results } = evaluateConditions(
       snapshot,
       trigger.conditions,
@@ -249,6 +267,7 @@ export class WatcherService {
       lastFiredAt: new Date(),
     });
 
+    triggersFired.inc();
     this.logger.log(`Trigger "${trigger.name}" (${trigger.id}) fired`);
   }
 }

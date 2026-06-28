@@ -20,10 +20,17 @@ import {
   routingKeyFor,
   TriggerFiredEvent,
 } from '@app/contracts';
+import { getCounter } from '@app/common';
 import { NotifierService } from '../notifier.service';
 import { PermanentNotificationError } from '../channels/channel.types';
 
 const CHANNELS: Channel[] = ['TELEGRAM', 'EMAIL', 'WEB_PUSH'];
+
+const retriesTotal = getCounter(
+  'notifier_retries_total',
+  'Total notification delivery retries by channel',
+  ['channel'],
+);
 
 @Injectable()
 export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
@@ -148,6 +155,7 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
       },
     );
     this.channelWrapper.ack(msg);
+    retriesTotal.inc({ channel });
     this.logger.warn(
       `${channel} retry ${thisAttempt}/${this.maxAttempts} for ${event.eventId}: ${message}`,
     );

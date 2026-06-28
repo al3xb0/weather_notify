@@ -13,6 +13,7 @@ import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
 import { MailService } from '@app/common';
 import { UsersService } from '../users/users.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshPayload, Tokens } from './types';
@@ -34,6 +35,7 @@ export class AuthService {
     private readonly users: UsersService,
     private readonly jwt: JwtService,
     private readonly mail: MailService,
+    private readonly metrics: MetricsService,
     config: ConfigService,
   ) {
     this.accessSecret = config.getOrThrow<string>('JWT_ACCESS_SECRET');
@@ -54,6 +56,7 @@ export class AuthService {
     const user = await this.users.create(dto.email, passwordHash);
     // Soft-gate: the account is usable immediately; email is verified later.
     await this.sendVerificationEmail(user.id, user.email);
+    this.metrics.recordAuth('register');
     return this.issueTokens(user.id, user.email);
   }
 
@@ -130,6 +133,7 @@ export class AuthService {
     if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
       throw new UnauthorizedException('Invalid credentials');
     }
+    this.metrics.recordAuth('login');
     return this.issueTokens(user.id, user.email);
   }
 
@@ -155,6 +159,7 @@ export class AuthService {
       where: { id: row.id },
       data: { revoked: true },
     });
+    this.metrics.recordAuth('refresh');
     return this.issueTokens(payload.sub, payload.email ?? '');
   }
 

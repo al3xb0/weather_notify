@@ -4,6 +4,8 @@ import { WatcherService } from './watcher.service';
 jest.mock('@app/common', () => ({
   evaluateConditions: jest.fn(),
   isWithinQuietHours: jest.fn(() => false),
+  getCounter: () => ({ inc: jest.fn() }),
+  getHistogram: () => ({ startTimer: () => jest.fn() }),
   // Constructor type only; never instantiated under direct unit construction.
   RedisService: class {},
 }));
