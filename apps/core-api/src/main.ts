@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
 import { startHealthServer } from '@app/common';
 import { CoreApiModule } from './core-api.module';
 
@@ -19,6 +20,7 @@ async function bootstrap() {
       transform: true,
     }),
   );
+  app.use(helmet());
   app.use(cookieParser());
   // Explicit allow-list (comma-separated) instead of reflecting any origin.
   // Credentials are enabled so the refresh token can ride in an httpOnly cookie.
