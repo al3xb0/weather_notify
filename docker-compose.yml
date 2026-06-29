@@ -66,7 +66,9 @@ services:
       RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
     command: sh -c "npx prisma migrate deploy && node dist/apps/core-api/main"
     ports:
-      - "3000:3000"
+      # Loopback only — exposed to the internet through the Caddy reverse proxy
+      # (TLS) in production, never directly. Use "3000:3000" for plain local dev.
+      - "127.0.0.1:3000:3000"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
       interval: 15s
