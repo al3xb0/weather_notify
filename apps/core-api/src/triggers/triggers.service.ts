@@ -16,8 +16,6 @@ import { UpdateTriggerDto } from './dto/update-trigger.dto';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
 
 const MAX_TRIGGERS_PER_USER = 20;
-// Per-user gap between manual test sends, enforced server-side so creating a
-// fresh trigger or reloading the page can't bypass it.
 const TEST_COOLDOWN_SEC = 60;
 const TRIGGER_INCLUDE = {
   conditions: { orderBy: { order: 'asc' as const } },

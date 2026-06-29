@@ -53,7 +53,6 @@ export class AuthService {
   async register(dto: RegisterDto): Promise<Tokens> {
     const existing = await this.users.findByEmail(dto.email);
     if (existing) {
-      // Neutral message to avoid confirming which emails are registered.
       throw new ConflictException('Unable to register with these details');
     }
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);

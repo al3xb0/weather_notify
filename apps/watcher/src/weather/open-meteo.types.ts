@@ -1,7 +1,5 @@
 import { z } from 'zod';
 
-// External payload — validated at runtime so a null/missing field surfaces as a
-// fetch error instead of silently becoming NaN downstream.
 export const openMeteoCurrentSchema = z.object({
   temperature_2m: z.number(),
   apparent_temperature: z.number(),
