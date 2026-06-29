@@ -44,6 +44,9 @@ async function bootstrap() {
   await app.listen(config.get<number>('CORE_API_PORT') ?? 3000);
   // Metrics live on a separate, unpublished port so internal data is never
   // reachable from the public API (mirrors watcher/notifier health servers).
-  startHealthServer(config.get<number>('CORE_API_METRICS_PORT') ?? 3004, 'CoreApi');
+  startHealthServer(
+    config.get<number>('CORE_API_METRICS_PORT') ?? 3004,
+    'CoreApi',
+  );
 }
 void bootstrap();

@@ -16,10 +16,7 @@ export class PinnedCitiesService {
     });
   }
 
-  async create(
-    userId: string,
-    dto: CreatePinnedCityDto,
-  ): Promise<PinnedCity> {
+  async create(userId: string, dto: CreatePinnedCityDto): Promise<PinnedCity> {
     const count = await this.prisma.pinnedCity.count({ where: { userId } });
     if (count >= MAX_PINNED_PER_USER) {
       throw new BadRequestException(

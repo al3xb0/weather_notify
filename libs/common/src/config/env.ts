@@ -6,10 +6,15 @@ const required = (name: string) => z.string().min(1, `${name} is required`);
 const jwtSecret = z
   .string()
   .min(32, 'must be at least 32 characters')
-  .refine((v) => !v.startsWith('change-me'), 'must not be a change-me placeholder');
+  .refine(
+    (v) => !v.startsWith('change-me'),
+    'must not be a change-me placeholder',
+  );
 
 const base = {
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  NODE_ENV: z
+    .enum(['development', 'production', 'test'])
+    .default('development'),
   DATABASE_URL: required('DATABASE_URL'),
 };
 

@@ -139,10 +139,7 @@ export class AdminService {
     return this.getUser(id);
   }
 
-  async deleteUser(
-    actingUserId: string,
-    id: string,
-  ): Promise<{ id: string }> {
+  async deleteUser(actingUserId: string, id: string): Promise<{ id: string }> {
     if (actingUserId === id) {
       throw new BadRequestException('You cannot delete your own account here');
     }

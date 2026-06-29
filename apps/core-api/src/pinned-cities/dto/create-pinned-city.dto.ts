@@ -1,4 +1,11 @@
-import { IsNumber, IsOptional, IsString, Length, Max, Min } from 'class-validator';
+import {
+  IsNumber,
+  IsOptional,
+  IsString,
+  Length,
+  Max,
+  Min,
+} from 'class-validator';
 
 export class CreatePinnedCityDto {
   @IsString()

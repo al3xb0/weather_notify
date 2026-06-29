@@ -28,7 +28,9 @@ describe('Admin API (e2e)', () => {
   };
 
   const register = (email: string) =>
-    request(app.getHttpServer()).post('/auth/register').send({ email, password });
+    request(app.getHttpServer())
+      .post('/auth/register')
+      .send({ email, password });
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -36,7 +38,9 @@ describe('Admin API (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, transform: true }),
+    );
     prisma = app.get(PrismaService);
     await app.init();
 
