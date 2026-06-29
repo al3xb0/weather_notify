@@ -9,7 +9,9 @@ services:
       POSTGRES_PASSWORD: weather
       POSTGRES_DB: weather_notify
     ports:
-      - "5432:5432"
+      # Bound to loopback only — reachable for local tooling, never from the
+      # public interface. Services talk to it over the internal compose network.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +26,7 @@ services:
     restart: unless-stopped
     mem_limit: 256m
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -40,9 +42,9 @@ services:
       RABBITMQ_DEFAULT_USER: weather
       RABBITMQ_DEFAULT_PASS: weather
     ports:
-      - "5672:5672"
+      - "127.0.0.1:5672:5672"
       # Management UI is dev-only — do NOT publish it in production.
-      # - "15672:15672"
+      # - "127.0.0.1:15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 15s

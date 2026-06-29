@@ -32,14 +32,18 @@ async function bootstrap() {
     .filter(Boolean);
   app.enableCors({ origin: corsOrigins, credentials: true });
 
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('Weather Notify — Core API')
-    .setDescription('Users, triggers and notification history')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('docs', app, document);
+  // Expose the API explorer everywhere except production, where it would
+  // needlessly publish the full surface (and bearer scheme) to the internet.
+  if (config.get('NODE_ENV') !== 'production') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('Weather Notify — Core API')
+      .setDescription('Users, triggers and notification history')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('docs', app, document);
+  }
 
   await app.listen(config.get<number>('CORE_API_PORT') ?? 3000);
   // Metrics live on a separate, unpublished port so internal data is never

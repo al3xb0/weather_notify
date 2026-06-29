@@ -40,14 +40,29 @@ function parseHHMM(value: string): number | null {
 }
 
 function localMinutes(now: Date, timezone: string | null | undefined): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-    timeZone: timezone || 'UTC',
-  }).formatToParts(now);
+  const parts = formatParts(now, timezone || 'UTC');
   const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
   const min = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
   // Intl can emit "24" for midnight in some runtimes; normalize to 0..23.
   return (h % 24) * 60 + min;
+}
+
+function formatParts(now: Date, timeZone: string): Intl.DateTimeFormatPart[] {
+  const opts: Intl.DateTimeFormatOptions = {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  };
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      ...opts,
+      timeZone,
+    }).formatToParts(now);
+  } catch {
+    // Defensive fallback for legacy/invalid zones already stored in the DB.
+    return new Intl.DateTimeFormat('en-US', {
+      ...opts,
+      timeZone: 'UTC',
+    }).formatToParts(now);
+  }
 }

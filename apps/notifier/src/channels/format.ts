@@ -46,6 +46,20 @@ export function alertText(event: TriggerFiredEvent): string {
   return `${prefix}In ${event.city}: ${parts}.`;
 }
 
+const HTML_ESCAPE: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => HTML_ESCAPE[c]);
+}
+
 export function alertHtml(event: TriggerFiredEvent): string {
-  return `<h2>${alertTitle(event)}</h2><p>${alertText(event)}</p>`;
+  // alertTitle/alertText carry user-controlled trigger name and city, so escape
+  // them before embedding in the HTML email body to prevent markup injection.
+  return `<h2>${escapeHtml(alertTitle(event))}</h2><p>${escapeHtml(alertText(event))}</p>`;
 }

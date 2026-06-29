@@ -58,8 +58,16 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     while (this.running) {
       try {
         for (const update of await this.getUpdates()) {
-          this.offset = update.update_id + 1;
-          await this.handle(update);
+          try {
+            await this.handle(update);
+          } catch (err) {
+            // A failed handler must not wedge the poller on the same offset.
+            this.logger.error(
+              `Handling update ${update.update_id} failed: ${(err as Error).message}`,
+            );
+          } finally {
+            this.offset = update.update_id + 1;
+          }
         }
       } catch (err) {
         this.logger.error(`getUpdates failed: ${(err as Error).message}`);

@@ -153,10 +153,23 @@ export class AuthService {
     const row = await this.prisma.refreshToken.findUnique({
       where: { id: payload.jti },
     });
-    if (!row || row.revoked || row.expiresAt < new Date()) {
+    if (!row || row.expiresAt < new Date()) {
       throw new UnauthorizedException('Invalid refresh token');
     }
+    // Verify the token against the stored hash before trusting its jti, so a
+    // forged jti pointing at another user's row can't drive the reuse path.
     if (!(await bcrypt.compare(refreshToken, row.tokenHash))) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+    if (row.revoked) {
+      // Reuse detection: an already-rotated token is being replayed, which
+      // means it likely leaked. Revoke the user's whole token family so both
+      // the attacker and the legitimate user must re-authenticate.
+      await this.prisma.refreshToken.updateMany({
+        where: { userId: row.userId, revoked: false },
+        data: { revoked: true },
+      });
+      this.logger.warn(`Refresh token reuse detected for user ${row.userId}`);
       throw new UnauthorizedException('Invalid refresh token');
     }
 
