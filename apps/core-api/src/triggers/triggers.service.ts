@@ -15,8 +15,8 @@ import { ConditionDto, CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
 
-const MAX_TRIGGERS_PER_USER = 20;
-const TEST_COOLDOWN_SEC = 60;
+const MAX_TRIGGERS_PER_USER = 10;
+const TEST_COOLDOWN_SEC = 600; // 10 minutes
 const TRIGGER_INCLUDE = {
   conditions: { orderBy: { order: 'asc' as const } },
 } satisfies Prisma.TriggerInclude;

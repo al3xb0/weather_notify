@@ -64,7 +64,7 @@ export class CreateTriggerDto {
 
   @IsOptional()
   @IsInt()
-  @Min(5)
+  @Min(10)
   @Max(1440)
   cooldownMin?: number;
 
