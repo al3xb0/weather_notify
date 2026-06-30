@@ -137,4 +137,4 @@ frontend deploy (Vercel).
 
 ---
 
-Created by [Aliaksei Konyshau](https://aliaksei-konyshau.vercel.app/).
+Created by [Aliaksei Konyshau](https://www.al-gres.com/).
