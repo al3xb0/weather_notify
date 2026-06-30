@@ -37,6 +37,7 @@ jobs:
     env:
       DATABASE_URL: postgresql://weather:weather@localhost:5432/weather_notify?schema=public
       REDIS_URL: redis://localhost:6379
+      RABBITMQ_URL: amqp://localhost:5672
       JWT_ACCESS_SECRET: ci-access-secret-0123456789-abcdefghij
       JWT_REFRESH_SECRET: ci-refresh-secret-0123456789-abcdefghij
 
