@@ -9,6 +9,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { CommandBus, QueryBus } from '@nestjs/cqrs';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -16,13 +17,19 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { TriggersService } from './triggers.service';
 import { CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
 import {
   TriggerResponseDto,
   TriggerTestResultDto,
 } from './dto/trigger-response.dto';
+import { CreateTriggerCommand } from './commands/create-trigger.command';
+import { UpdateTriggerCommand } from './commands/update-trigger.command';
+import { DeleteTriggerCommand } from './commands/delete-trigger.command';
+import { ClearTriggersCommand } from './commands/clear-triggers.command';
+import { SendTestNotificationCommand } from './commands/send-test-notification.command';
+import { ListTriggersQuery } from './queries/list-triggers.query';
+import { GetTriggerQuery } from './queries/get-trigger.query';
 import {
   ApiPaginatedResponse,
   PaginationDto,
@@ -40,24 +47,27 @@ import type { AuthUser } from '../auth/types';
 @UseGuards(JwtAuthGuard)
 @Controller('triggers')
 export class TriggersController {
-  constructor(private readonly triggers: TriggersService) {}
+  constructor(
+    private readonly commands: CommandBus,
+    private readonly queries: QueryBus,
+  ) {}
 
   @Post()
   @ApiCreatedResponse({ type: TriggerResponseDto })
   create(@CurrentUser() user: AuthUser, @Body() dto: CreateTriggerDto) {
-    return this.triggers.create(user.userId, dto);
+    return this.commands.execute(new CreateTriggerCommand(user.userId, dto));
   }
 
   @Get()
   @ApiPaginatedResponse(TriggerResponseDto)
   findAll(@CurrentUser() user: AuthUser, @Query() query: PaginationDto) {
-    return this.triggers.findAll(user.userId, query);
+    return this.queries.execute(new ListTriggersQuery(user.userId, query));
   }
 
   @Get(':id')
   @ApiOkResponse({ type: TriggerResponseDto })
   findOne(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    return this.triggers.findOne(user.userId, id);
+    return this.queries.execute(new GetTriggerQuery(user.userId, id));
   }
 
   @Patch(':id')
@@ -67,25 +77,29 @@ export class TriggersController {
     @Param('id') id: string,
     @Body() dto: UpdateTriggerDto,
   ) {
-    return this.triggers.update(user.userId, id, dto);
+    return this.commands.execute(
+      new UpdateTriggerCommand(user.userId, id, dto),
+    );
   }
 
   @Delete()
   @ApiOkResponse({ type: CountResultDto })
   clear(@CurrentUser() user: AuthUser) {
-    return this.triggers.clear(user.userId);
+    return this.commands.execute(new ClearTriggersCommand(user.userId));
   }
 
   @Delete(':id')
   @ApiOkResponse({ type: IdResultDto })
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    return this.triggers.remove(user.userId, id);
+    return this.commands.execute(new DeleteTriggerCommand(user.userId, id));
   }
 
   @Post(':id/test')
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @ApiCreatedResponse({ type: TriggerTestResultDto })
   test(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    return this.triggers.sendTest(user.userId, id);
+    return this.commands.execute(
+      new SendTestNotificationCommand(user.userId, id),
+    );
   }
 }
