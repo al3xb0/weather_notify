@@ -11,6 +11,7 @@
   "moduleNameMapper": {
     "^@app/common(|/.*)$": "<rootDir>/libs/common/src$1",
     "^@app/contracts(|/.*)$": "<rootDir>/libs/contracts/src$1",
-    "^@app/database(|/.*)$": "<rootDir>/libs/database/src$1"
+    "^@app/database(|/.*)$": "<rootDir>/libs/database/src$1",
+    "^@app/domain(|/.*)$": "<rootDir>/libs/domain/src$1"
   }
 }
