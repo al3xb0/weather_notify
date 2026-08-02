@@ -51,6 +51,11 @@ jobs:
 
       - run: npm ci
 
+      # An advisory reaches production through the lockfile rather than through
+      # a diff, so no other step in this job would ever fail because of one.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
       - name: Apply migrations
         run: npx prisma migrate deploy
 
