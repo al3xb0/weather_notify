@@ -68,3 +68,74 @@ jobs:
 
       - name: E2E tests
         run: npm run test:e2e
+
+  # The suites above run everything against ports and fakes, which cannot catch
+  # a wrong queue argument or a container that never reaches readiness. This job
+  # boots the real compose stack and asserts both.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write .env for compose
+        run: |
+          cp .env.example .env
+          sed -i 's|^JWT_ACCESS_SECRET=.*|JWT_ACCESS_SECRET="ci-access-secret-0123456789-abcdefghij"|' .env
+          sed -i 's|^JWT_REFRESH_SECRET=.*|JWT_REFRESH_SECRET="ci-refresh-secret-0123456789-abcdefghij"|' .env
+
+      - name: Start the stack
+        run: docker compose up -d --build --wait --wait-timeout 300
+
+      # `up --wait` already gates on the healthchecks, which hit /ready. Asserting
+      # it again from inside each container makes the failure legible when a
+      # dependency, not the process, is what is down.
+      - name: Every service reports ready
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:3000/health
+          docker compose exec -T core-api wget -qO- http://localhost:3004/ready
+          docker compose exec -T watcher  wget -qO- http://localhost:3002/ready
+          docker compose exec -T notifier wget -qO- http://localhost:3003/ready
+
+      - name: Retry and dead-letter topology exists in RabbitMQ
+        run: |
+          set -euo pipefail
+          # Queues are declared when the notifier's channel finishes its setup,
+          # which can trail readiness by a moment.
+          for attempt in $(seq 1 15); do
+            queues=$(docker compose exec -T rabbitmq rabbitmqctl list_queues name --formatter json || echo '[]')
+            echo "$queues" | grep -q 'notifications.email.dead' && break
+            sleep 2
+          done
+          echo "$queues"
+          missing=0
+          for channel in telegram email push; do
+            for suffix in "" ".retry.1" ".retry.2" ".retry.3" ".dead"; do
+              name="notifications.${channel}${suffix}"
+              echo "$queues" | grep -q "\"${name}\"" || { echo "missing queue ${name}"; missing=1; }
+            done
+          done
+          [ "$missing" = "0" ]
+
+      - name: The API is actually usable
+        run: |
+          set -euo pipefail
+          token=$(curl -fsS -X POST http://localhost:3000/auth/register \
+            -H 'content-type: application/json' \
+            -d '{"email":"smoke@example.com","password":"sm0ke-Passw0rd!"}' \
+            | jq -er .accessToken)
+          curl -fsS http://localhost:3000/users/me -H "authorization: Bearer $token" | jq -e '.email == "smoke@example.com"'
+          # Unverified users must not be able to arm alerts — the soft-gate is
+          # policy, so a green path here would hide a real regression.
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3000/triggers \
+            -H "authorization: Bearer $token" -H 'content-type: application/json' \
+            -d '{"name":"Heat","city":"Berlin","latitude":52.52,"longitude":13.405,"channels":["EMAIL"],"conditions":[{"metric":"TEMPERATURE","operator":"GT","threshold":30}]}')
+          [ "$status" = "403" ] || { echo "expected 403 for an unverified user, got $status"; exit 1; }
+
+      - name: Service logs
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
