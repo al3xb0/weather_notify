@@ -12,7 +12,6 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { RedisService } from '@app/common';
 import {
-  Channel,
   EVENT_PUBLISHER,
   routingKeyFor,
   TriggerFiredEvent,
@@ -20,6 +19,11 @@ import {
 import type { EventPublisher } from '@app/contracts';
 import { ConditionDto, CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
+import {
+  toTriggerResponse,
+  TriggerResponseDto,
+  TriggerTestResultDto,
+} from './dto/trigger-response.dto';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
 
 const MAX_TRIGGERS_PER_USER = 10;
@@ -27,10 +31,6 @@ const TEST_COOLDOWN_SEC = 600; // 10 minutes
 const TRIGGER_INCLUDE = {
   conditions: { orderBy: { order: 'asc' as const } },
 } satisfies Prisma.TriggerInclude;
-
-type TriggerWithConditions = Prisma.TriggerGetPayload<{
-  include: { conditions: true };
-}>;
 
 function conditionRows(conditions: ConditionDto[]) {
   return conditions.map((c, order) => ({
@@ -52,7 +52,7 @@ export class TriggersService {
   async create(
     userId: string,
     dto: CreateTriggerDto,
-  ): Promise<TriggerWithConditions> {
+  ): Promise<TriggerResponseDto> {
     // Soft-gate: only verified users can arm alerts.
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -70,7 +70,7 @@ export class TriggersService {
       );
     }
     const { conditions, conditionLogic, ...rest } = dto;
-    return this.prisma.trigger.create({
+    const created = await this.prisma.trigger.create({
       data: {
         ...rest,
         userId,
@@ -79,12 +79,13 @@ export class TriggersService {
       },
       include: TRIGGER_INCLUDE,
     });
+    return toTriggerResponse(created);
   }
 
   async findAll(
     userId: string,
     { page = 1, limit = 20 }: PaginationDto,
-  ): Promise<PaginatedResult<TriggerWithConditions>> {
+  ): Promise<PaginatedResult<TriggerResponseDto>> {
     const where: Prisma.TriggerWhereInput = { userId };
     const [items, total] = await this.prisma.$transaction([
       this.prisma.trigger.findMany({
@@ -96,10 +97,15 @@ export class TriggersService {
       }),
       this.prisma.trigger.count({ where }),
     ]);
-    return { items, total, page, limit };
+    return { items: items.map(toTriggerResponse), total, page, limit };
   }
 
-  async findOne(userId: string, id: string): Promise<TriggerWithConditions> {
+  async findOne(userId: string, id: string): Promise<TriggerResponseDto> {
+    return toTriggerResponse(await this.findRow(userId, id));
+  }
+
+  /** The raw row, for callers that need fields the response omits. */
+  private async findRow(userId: string, id: string) {
     const trigger = await this.prisma.trigger.findFirst({
       where: { id, userId },
       include: TRIGGER_INCLUDE,
@@ -114,10 +120,10 @@ export class TriggersService {
     userId: string,
     id: string,
     dto: UpdateTriggerDto,
-  ): Promise<TriggerWithConditions> {
-    await this.findOne(userId, id);
+  ): Promise<TriggerResponseDto> {
+    await this.findRow(userId, id);
     const { conditions, conditionLogic, ...rest } = dto;
-    return this.prisma.trigger.update({
+    const updated = await this.prisma.trigger.update({
       where: { id },
       data: {
         ...rest,
@@ -131,10 +137,11 @@ export class TriggersService {
       },
       include: TRIGGER_INCLUDE,
     });
+    return toTriggerResponse(updated);
   }
 
   async remove(userId: string, id: string): Promise<{ id: string }> {
-    await this.findOne(userId, id);
+    await this.findRow(userId, id);
     await this.prisma.trigger.delete({ where: { id } });
     return { id };
   }
@@ -151,8 +158,8 @@ export class TriggersService {
    * Publish a test event for the trigger through its configured channels. Runs
    * the normal notifier path (retry/DLQ + history) but flagged as a test.
    */
-  async sendTest(userId: string, id: string): Promise<{ sent: Channel[] }> {
-    const trigger = await this.findOne(userId, id);
+  async sendTest(userId: string, id: string): Promise<TriggerTestResultDto> {
+    const trigger = await this.findRow(userId, id);
     const retryAfter = await this.redis.consumeCooldown(
       `trigger-test:${userId}`,
       TEST_COOLDOWN_SEC,

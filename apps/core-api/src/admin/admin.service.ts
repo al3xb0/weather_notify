@@ -7,6 +7,12 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import {
+  AdminStatsDto,
+  AdminUserDetailDto,
+  AdminUserDto,
+} from './dto/admin-user.dto';
+import { toTriggerResponse } from '../triggers/dto/trigger-response.dto';
 
 const TRIGGER_INCLUDE = {
   conditions: { orderBy: { order: 'asc' as const } },
@@ -16,7 +22,7 @@ const TRIGGER_INCLUDE = {
 export class AdminService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async stats() {
+  async stats(): Promise<AdminStatsDto> {
     const [
       users,
       verifiedUsers,
@@ -51,18 +57,10 @@ export class AdminService {
     };
   }
 
-  async listUsers({ page = 1, limit = 20 }: PaginationDto): Promise<
-    PaginatedResult<{
-      id: string;
-      email: string;
-      role: string;
-      emailVerified: boolean;
-      telegramLinked: boolean;
-      triggerCount: number;
-      notificationCount: number;
-      createdAt: Date;
-    }>
-  > {
+  async listUsers({
+    page = 1,
+    limit = 20,
+  }: PaginationDto): Promise<PaginatedResult<AdminUserDto>> {
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.user.findMany({
         orderBy: { createdAt: 'desc' },
@@ -93,7 +91,7 @@ export class AdminService {
     return { items, total, page, limit };
   }
 
-  async getUser(id: string) {
+  async getUser(id: string): Promise<AdminUserDetailDto> {
     const user = await this.prisma.user.findUnique({
       where: { id },
       select: {
@@ -116,16 +114,20 @@ export class AdminService {
     if (!user) {
       throw new NotFoundException('User not found');
     }
-    const { telegramChatId, _count, ...rest } = user;
+    const { telegramChatId, _count, triggers, ...rest } = user;
     return {
       ...rest,
       telegramLinked: Boolean(telegramChatId),
+      triggers: triggers.map(toTriggerResponse),
       notificationCount: _count.notifications,
       pinnedCityCount: _count.pinnedCities,
     };
   }
 
-  async updateUser(id: string, dto: UpdateUserDto) {
+  async updateUser(
+    id: string,
+    dto: UpdateUserDto,
+  ): Promise<AdminUserDetailDto> {
     await this.assertExists(id);
     await this.prisma.user.update({
       where: { id },

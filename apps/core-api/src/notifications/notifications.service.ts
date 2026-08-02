@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { Notification } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
+import {
+  NotificationResponseDto,
+  toNotificationResponse,
+} from './dto/notification-response.dto';
 
 @Injectable()
 export class NotificationsService {
@@ -10,7 +13,7 @@ export class NotificationsService {
   async findAll(
     userId: string,
     { page = 1, limit = 20 }: PaginationDto,
-  ): Promise<PaginatedResult<Notification>> {
+  ): Promise<PaginatedResult<NotificationResponseDto>> {
     const [items, total] = await this.prisma.$transaction([
       this.prisma.notification.findMany({
         where: { userId },
@@ -20,7 +23,7 @@ export class NotificationsService {
       }),
       this.prisma.notification.count({ where: { userId } }),
     ]);
-    return { items, total, page, limit };
+    return { items: items.map(toNotificationResponse), total, page, limit };
   }
 
   async remove(userId: string, id: string): Promise<{ id: string }> {

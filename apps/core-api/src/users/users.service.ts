@@ -5,27 +5,21 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '@app/database';
-import { PushSubscription, Role, User } from '@prisma/client';
+import { User } from '@prisma/client';
 import {
   CreatePushSubscriptionDto,
   DeletePushSubscriptionDto,
 } from './dto/push-subscription.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import {
+  ProfileResponseDto,
+  PushSubscriptionResponseDto,
+  TelegramLinkDto,
+  toProfileResponse,
+  toPushSubscriptionResponse,
+} from './dto/profile-response.dto';
 
 const TELEGRAM_LINK_TTL_MS = 15 * 60 * 1000;
-
-export interface UserProfile {
-  id: string;
-  email: string;
-  role: Role;
-  telegramChatId: string | null;
-  telegramLinked: boolean;
-  emailVerified: boolean;
-  quietHoursStart: string | null;
-  quietHoursEnd: string | null;
-  timezone: string | null;
-  createdAt: Date;
-}
 
 @Injectable()
 export class UsersService {
@@ -43,30 +37,19 @@ export class UsersService {
     return this.prisma.user.create({ data: { email, passwordHash } });
   }
 
-  async getProfile(userId: string): Promise<UserProfile> {
+  async getProfile(userId: string): Promise<ProfileResponseDto> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new NotFoundException('User not found');
     }
-    return {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      telegramChatId: user.telegramChatId,
-      telegramLinked: Boolean(user.telegramChatId),
-      emailVerified: user.emailVerified,
-      quietHoursStart: user.quietHoursStart,
-      quietHoursEnd: user.quietHoursEnd,
-      timezone: user.timezone,
-      createdAt: user.createdAt,
-    };
+    return toProfileResponse(user);
   }
 
   /** Update notification preferences (quiet hours + timezone). */
   async updateProfile(
     userId: string,
     dto: UpdateProfileDto,
-  ): Promise<UserProfile> {
+  ): Promise<ProfileResponseDto> {
     await this.prisma.user.update({
       where: { id: userId },
       data: {
@@ -82,7 +65,7 @@ export class UsersService {
   async createTelegramLink(
     userId: string,
     botUsername: string,
-  ): Promise<{ url: string; token: string }> {
+  ): Promise<TelegramLinkDto> {
     const token = randomUUID();
     await this.prisma.user.update({
       where: { id: userId },
@@ -135,14 +118,19 @@ export class UsersService {
     return true;
   }
 
-  listPushSubscriptions(userId: string): Promise<PushSubscription[]> {
-    return this.prisma.pushSubscription.findMany({ where: { userId } });
+  async listPushSubscriptions(
+    userId: string,
+  ): Promise<PushSubscriptionResponseDto[]> {
+    const rows = await this.prisma.pushSubscription.findMany({
+      where: { userId },
+    });
+    return rows.map(toPushSubscriptionResponse);
   }
 
   async addPushSubscription(
     userId: string,
     dto: CreatePushSubscriptionDto,
-  ): Promise<PushSubscription> {
+  ): Promise<PushSubscriptionResponseDto> {
     const existing = await this.prisma.pushSubscription.findUnique({
       where: { endpoint: dto.endpoint },
     });
@@ -150,7 +138,7 @@ export class UsersService {
     if (existing && existing.userId !== userId) {
       throw new ForbiddenException('Endpoint already registered');
     }
-    return this.prisma.pushSubscription.upsert({
+    const saved = await this.prisma.pushSubscription.upsert({
       where: { endpoint: dto.endpoint },
       create: {
         userId,
@@ -160,6 +148,7 @@ export class UsersService {
       },
       update: { p256dh: dto.keys.p256dh, auth: dto.keys.auth },
     });
+    return toPushSubscriptionResponse(saved);
   }
 
   async removePushSubscription(

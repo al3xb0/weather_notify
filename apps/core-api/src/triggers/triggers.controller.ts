@@ -9,12 +9,28 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiCreatedResponse,
+  ApiOkResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { TriggersService } from './triggers.service';
 import { CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
-import { PaginationDto } from '../common/dto/pagination.dto';
+import {
+  TriggerResponseDto,
+  TriggerTestResultDto,
+} from './dto/trigger-response.dto';
+import {
+  ApiPaginatedResponse,
+  PaginationDto,
+} from '../common/dto/pagination.dto';
+import {
+  CountResultDto,
+  IdResultDto,
+} from '../common/dto/operation-result.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
@@ -27,21 +43,25 @@ export class TriggersController {
   constructor(private readonly triggers: TriggersService) {}
 
   @Post()
+  @ApiCreatedResponse({ type: TriggerResponseDto })
   create(@CurrentUser() user: AuthUser, @Body() dto: CreateTriggerDto) {
     return this.triggers.create(user.userId, dto);
   }
 
   @Get()
+  @ApiPaginatedResponse(TriggerResponseDto)
   findAll(@CurrentUser() user: AuthUser, @Query() query: PaginationDto) {
     return this.triggers.findAll(user.userId, query);
   }
 
   @Get(':id')
+  @ApiOkResponse({ type: TriggerResponseDto })
   findOne(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.triggers.findOne(user.userId, id);
   }
 
   @Patch(':id')
+  @ApiOkResponse({ type: TriggerResponseDto })
   update(
     @CurrentUser() user: AuthUser,
     @Param('id') id: string,
@@ -51,17 +71,20 @@ export class TriggersController {
   }
 
   @Delete()
+  @ApiOkResponse({ type: CountResultDto })
   clear(@CurrentUser() user: AuthUser) {
     return this.triggers.clear(user.userId);
   }
 
   @Delete(':id')
+  @ApiOkResponse({ type: IdResultDto })
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.triggers.remove(user.userId, id);
   }
 
   @Post(':id/test')
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @ApiCreatedResponse({ type: TriggerTestResultDto })
   test(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.triggers.sendTest(user.userId, id);
   }

@@ -1,7 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { PinnedCity, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { CreatePinnedCityDto } from './dto/create-pinned-city.dto';
+import {
+  PinnedCityResponseDto,
+  toPinnedCityResponse,
+} from './dto/pinned-city-response.dto';
 
 const MAX_PINNED_PER_USER = 12;
 
@@ -9,14 +13,18 @@ const MAX_PINNED_PER_USER = 12;
 export class PinnedCitiesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  findAll(userId: string): Promise<PinnedCity[]> {
-    return this.prisma.pinnedCity.findMany({
+  async findAll(userId: string): Promise<PinnedCityResponseDto[]> {
+    const rows = await this.prisma.pinnedCity.findMany({
       where: { userId },
       orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
     });
+    return rows.map(toPinnedCityResponse);
   }
 
-  async create(userId: string, dto: CreatePinnedCityDto): Promise<PinnedCity> {
+  async create(
+    userId: string,
+    dto: CreatePinnedCityDto,
+  ): Promise<PinnedCityResponseDto> {
     const count = await this.prisma.pinnedCity.count({ where: { userId } });
     if (count >= MAX_PINNED_PER_USER) {
       throw new BadRequestException(
@@ -24,7 +32,7 @@ export class PinnedCitiesService {
       );
     }
     try {
-      return await this.prisma.pinnedCity.create({
+      const created = await this.prisma.pinnedCity.create({
         data: {
           userId,
           name: dto.name,
@@ -35,6 +43,7 @@ export class PinnedCitiesService {
           order: count,
         },
       });
+      return toPinnedCityResponse(created);
     } catch (err) {
       // Unique [userId, lat, lon] — the city is already pinned.
       if (

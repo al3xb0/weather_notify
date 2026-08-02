@@ -36,7 +36,8 @@ describe('TriggersService', () => {
       trigger: {
         findFirst: jest.fn().mockResolvedValue(TRIGGER),
         count: jest.fn().mockResolvedValue(0),
-        create: jest.fn().mockResolvedValue({ id: 'new' }),
+        // Must look like a real row — the service maps it through a response DTO.
+        create: jest.fn().mockResolvedValue({ ...TRIGGER, id: 'new' }),
       },
       user: {
         findUnique: jest.fn().mockResolvedValue({ emailVerified: true }),
