@@ -11,6 +11,7 @@ import amqp, {
 } from 'amqp-connection-manager';
 import { ConfirmChannel } from 'amqplib';
 import {
+  EVENT_ID_HEADER,
   EventPublisher,
   NOTIFICATIONS_EXCHANGE,
   TriggerFiredEvent,
@@ -52,7 +53,15 @@ export class RabbitPublisherService
       persistent: true,
       messageId: message.eventId,
       contentType: 'application/json',
+      // Survives the main↔retry↔dead bounces, so consumer logs stay correlated
+      // even for a message that has been requeued several times.
+      headers: { [EVENT_ID_HEADER]: message.eventId },
     });
+  }
+
+  /** Readiness signal — liveness must not depend on the broker being up. */
+  isConnected(): boolean {
+    return this.connection?.isConnected() ?? false;
   }
 
   async onModuleDestroy(): Promise<void> {

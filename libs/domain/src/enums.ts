@@ -45,6 +45,8 @@ export const Channel = {
 export type Channel = (typeof Channel)[keyof typeof Channel];
 
 export const NotifStatus = {
+  /** Claimed before the channel call — the row that makes delivery idempotent. */
+  PENDING: 'PENDING',
   SENT: 'SENT',
   FAILED: 'FAILED',
 } as const;

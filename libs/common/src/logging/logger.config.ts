@@ -1,4 +1,5 @@
 import { Params } from 'nestjs-pino';
+import { currentLogContext } from './log-context';
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -12,6 +13,8 @@ export const loggerParams: Params = {
     transport: isProd
       ? undefined
       : { target: 'pino-pretty', options: { singleLine: true } },
+    // Stamps eventId/channel/attempt onto every line a message handler emits.
+    mixin: () => currentLogContext(),
     autoLogging: true,
     redact: {
       paths: ['req.headers.authorization', 'req.headers.cookie'],

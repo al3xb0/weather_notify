@@ -70,7 +70,9 @@ services:
       # (TLS) in production, never directly. Use "3000:3000" for plain local dev.
       - "127.0.0.1:3000:3000"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      # Readiness, not liveness: dependents must wait until Postgres and Redis
+      # are actually reachable, which /health (always 200) cannot tell them.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/ready || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -96,7 +98,7 @@ services:
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/ready || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -123,8 +125,11 @@ services:
       DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+    # Long enough for the consumer to cancel, drain in-flight deliveries and
+    # close the channel (see DRAIN_TIMEOUT_MS) before SIGKILL.
+    stop_grace_period: 40s
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/ready || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

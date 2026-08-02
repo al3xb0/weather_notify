@@ -26,14 +26,17 @@ function makeMsg(
     content: Buffer.from(
       typeof body === 'string' ? body : JSON.stringify(body),
     ),
-    properties: { messageId, headers },
+    properties: {
+      messageId,
+      headers: { 'x-event-id': event.eventId, ...headers },
+    },
     fields: {},
   } as unknown as ConsumeMessage;
 }
 
 describe('RabbitConsumerService failure handling', () => {
   let service: RabbitConsumerService;
-  let notifier: { dispatch: jest.Mock; log: jest.Mock };
+  let notifier: { dispatch: jest.Mock; settle: jest.Mock };
   let channelWrapper: { ack: jest.Mock; publish: jest.Mock };
 
   function build(overrides: Record<string, string> = {}): void {
@@ -42,8 +45,8 @@ describe('RabbitConsumerService failure handling', () => {
       getOrThrow: jest.fn(),
     };
     notifier = {
-      dispatch: jest.fn().mockResolvedValue(undefined),
-      log: jest.fn().mockResolvedValue(undefined),
+      dispatch: jest.fn().mockResolvedValue('sent'),
+      settle: jest.fn().mockResolvedValue(undefined),
     };
     service = new RabbitConsumerService(config as never, notifier as never);
     channelWrapper = {
@@ -72,6 +75,14 @@ describe('RabbitConsumerService failure handling', () => {
       }
     ).handleFailure('EMAIL', msg, event, err);
 
+  const publishCall = (i = 0) =>
+    channelWrapper.publish.mock.calls[i] as [
+      string,
+      string,
+      Buffer,
+      { headers: Record<string, unknown>; messageId?: string },
+    ];
+
   beforeEach(() => build());
 
   describe('handle', () => {
@@ -81,15 +92,26 @@ describe('RabbitConsumerService failure handling', () => {
       expect(channelWrapper.ack).not.toHaveBeenCalled();
     });
 
-    it('drops an unparseable message with an ack', async () => {
+    it('parks an unparseable message instead of dropping it', async () => {
       await handle(makeMsg('}{ not json'));
       expect(notifier.dispatch).not.toHaveBeenCalled();
+      const [exchange, key, , opts] = publishCall();
+      expect(exchange).toBe(DLX_EXCHANGE);
+      expect(key).toBe('email.dead');
+      expect(opts.headers['x-dead-reason']).toBe('unparseable');
       expect(channelWrapper.ack).toHaveBeenCalledTimes(1);
     });
 
     it('acks after a successful dispatch', async () => {
       await handle(makeMsg(event));
       expect(notifier.dispatch).toHaveBeenCalledWith('EMAIL', event);
+      expect(channelWrapper.ack).toHaveBeenCalledTimes(1);
+      expect(channelWrapper.publish).not.toHaveBeenCalled();
+    });
+
+    it('acks a duplicate the notifier skipped', async () => {
+      notifier.dispatch.mockResolvedValue('skipped');
+      await handle(makeMsg(event));
       expect(channelWrapper.ack).toHaveBeenCalledTimes(1);
       expect(channelWrapper.publish).not.toHaveBeenCalled();
     });
@@ -102,76 +124,100 @@ describe('RabbitConsumerService failure handling', () => {
     });
   });
 
-  describe('handleFailure', () => {
-    it('republishes to the retry queue on a transient first failure', async () => {
+  describe('staged retry', () => {
+    it('sends the first failure to the shortest retry stage', async () => {
       await handleFailure(makeMsg(event), new Error('smtp down'));
-      expect(channelWrapper.publish).toHaveBeenCalledTimes(1);
-      const [exchange, key, content, opts] =
-        channelWrapper.publish.mock.calls[0];
+      const [exchange, key, content, opts] = publishCall();
       expect(exchange).toBe(DLX_EXCHANGE);
-      expect(key).toBe('email.retry');
+      expect(key).toBe('email.retry.1');
       expect(content).toBeInstanceOf(Buffer);
       expect(opts).toMatchObject({
         persistent: true,
         contentType: 'application/json',
         messageId: 'm1',
-        headers: { 'x-attempts': 1 },
+        headers: { 'x-attempts': 1, 'x-event-id': 'e1' },
       });
       expect(channelWrapper.ack).toHaveBeenCalledTimes(1);
-      expect(notifier.log).not.toHaveBeenCalled();
+      expect(notifier.settle).not.toHaveBeenCalled();
     });
 
-    it('increments the attempt count from the x-attempts header', async () => {
+    it('escalates to the next stage on each further failure', async () => {
       await handleFailure(
         makeMsg(event, { 'x-attempts': 1 }),
         new Error('still down'),
       );
-      expect(channelWrapper.publish.mock.calls[0][3].headers).toEqual({
-        'x-attempts': 2,
-      });
-    });
+      expect(publishCall()[1]).toBe('email.retry.2');
+      expect(publishCall()[3].headers['x-attempts']).toBe(2);
 
-    it('dead-letters to FAILED once max attempts are reached', async () => {
-      // Default max is 3; header 2 makes this the 3rd attempt.
+      build();
       await handleFailure(
         makeMsg(event, { 'x-attempts': 2 }),
         new Error('still down'),
       );
-      expect(notifier.log).toHaveBeenCalledWith(
+      expect(publishCall()[1]).toBe('email.retry.3');
+      expect(publishCall()[3].headers['x-attempts']).toBe(3);
+    });
+
+    it('parks the message once every stage is exhausted', async () => {
+      // Three stages by default, so the 4th attempt has nowhere left to go.
+      await handleFailure(
+        makeMsg(event, { 'x-attempts': 3 }),
+        new Error('still down'),
+      );
+      expect(notifier.settle).toHaveBeenCalledWith(
         'EMAIL',
         event,
         NotifStatus.FAILED,
         'still down',
       );
+      const [, key, , opts] = publishCall();
+      expect(key).toBe('email.dead');
+      expect(opts.headers['x-dead-reason']).toBe('attempts_exhausted');
       expect(channelWrapper.ack).toHaveBeenCalledTimes(1);
-      expect(channelWrapper.publish).not.toHaveBeenCalled();
     });
 
-    it('fails permanently without retrying on a PermanentNotificationError', async () => {
+    it('parks a permanent failure without retrying', async () => {
       await handleFailure(
         makeMsg(event),
         new PermanentNotificationError('account unlinked'),
       );
-      expect(notifier.log).toHaveBeenCalledWith(
+      expect(notifier.settle).toHaveBeenCalledWith(
         'EMAIL',
         event,
         NotifStatus.FAILED,
         'account unlinked',
       );
+      expect(publishCall()[1]).toBe('email.dead');
+      expect(publishCall()[3].headers['x-dead-reason']).toBe('permanent');
       expect(channelWrapper.ack).toHaveBeenCalledTimes(1);
-      expect(channelWrapper.publish).not.toHaveBeenCalled();
     });
 
-    it('honours a configured NOTIFIER_MAX_ATTEMPTS of 1', async () => {
-      build({ NOTIFIER_MAX_ATTEMPTS: '1' });
-      await handleFailure(makeMsg(event), new Error('first and last'));
-      expect(notifier.log).toHaveBeenCalledWith(
+    it('honours a configured single-stage backoff', async () => {
+      build({ NOTIFIER_RETRY_DELAYS_MS: '1000' });
+      await handleFailure(makeMsg(event), new Error('first attempt'));
+      expect(publishCall()[1]).toBe('email.retry.1');
+
+      build({ NOTIFIER_RETRY_DELAYS_MS: '1000' });
+      await handleFailure(
+        makeMsg(event, { 'x-attempts': 1 }),
+        new Error('last attempt'),
+      );
+      expect(publishCall()[1]).toBe('email.dead');
+      expect(notifier.settle).toHaveBeenCalledWith(
         'EMAIL',
         event,
         NotifStatus.FAILED,
-        'first and last',
+        'last attempt',
       );
-      expect(channelWrapper.publish).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the default stages when the config is unusable', async () => {
+      build({ NOTIFIER_RETRY_DELAYS_MS: 'abc, -5' });
+      await handleFailure(
+        makeMsg(event, { 'x-attempts': 2 }),
+        new Error('down'),
+      );
+      expect(publishCall()[1]).toBe('email.retry.3');
     });
   });
 });

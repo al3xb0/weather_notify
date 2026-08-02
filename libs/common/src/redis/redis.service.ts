@@ -60,6 +60,11 @@ export class RedisService implements OnModuleDestroy {
     return res === 1;
   }
 
+  /** Readiness signal — liveness must not depend on Redis being up. */
+  isConnected(): boolean {
+    return this.client.status === 'ready';
+  }
+
   onModuleDestroy(): void {
     this.client.disconnect();
   }

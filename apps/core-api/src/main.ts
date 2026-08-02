@@ -5,12 +5,14 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import { startHealthServer } from '@app/common';
+import { RedisService, startHealthServer } from '@app/common';
+import { PrismaService } from '@app/database';
 import { CoreApiModule } from './core-api.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(CoreApiModule, { bufferLogs: true });
   app.useLogger(app.get(Logger));
+  app.enableShutdownHooks();
   const config = app.get(ConfigService);
 
   app.useGlobalPipes(
@@ -48,9 +50,15 @@ async function bootstrap() {
   await app.listen(config.get<number>('CORE_API_PORT') ?? 3000);
   // Metrics live on a separate, unpublished port so internal data is never
   // reachable from the public API (mirrors watcher/notifier health servers).
+  const prisma = app.get(PrismaService);
+  const redis = app.get(RedisService);
   startHealthServer(
     config.get<number>('CORE_API_METRICS_PORT') ?? 3004,
     'CoreApi',
+    {
+      postgres: () => prisma.isReachable(),
+      redis: () => redis.isConnected(),
+    },
   );
 }
 void bootstrap();

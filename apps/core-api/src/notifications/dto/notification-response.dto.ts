@@ -6,8 +6,13 @@ export class NotificationResponseDto {
   @ApiProperty({ format: 'uuid' })
   id!: string;
 
-  @ApiProperty({ format: 'uuid' })
-  triggerId!: string;
+  @ApiProperty({
+    type: String,
+    format: 'uuid',
+    nullable: true,
+    description: 'Null once the originating trigger has been deleted',
+  })
+  triggerId!: string | null;
 
   @ApiProperty({ enum: Object.values(Channel), enumName: 'Channel' })
   channel!: Channel;

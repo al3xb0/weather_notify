@@ -41,6 +41,7 @@ enum ConditionLogic {
 }
 
 enum NotifStatus {
+  PENDING
   SENT
   FAILED
 }
@@ -51,77 +52,87 @@ enum Role {
 }
 
 model User {
-  id               String             @id @default(uuid())
-  email            String             @unique
-  passwordHash     String
-  role             Role               @default(USER)
-  telegramChatId   String?
-  telegramLinkToken String?           @unique
-  telegramLinkTokenExpiresAt DateTime?
-  quietHoursStart  String?
-  quietHoursEnd    String?
-  timezone         String?
-  emailVerified    Boolean            @default(false)
-  emailVerificationToken String?      @unique
+  id                              String             @id @default(uuid())
+  email                           String             @unique
+  passwordHash                    String
+  role                            Role               @default(USER)
+  telegramChatId                  String?
+  telegramLinkToken               String?            @unique
+  telegramLinkTokenExpiresAt      DateTime?
+  quietHoursStart                 String?
+  quietHoursEnd                   String?
+  timezone                        String?
+  emailVerified                   Boolean            @default(false)
+  emailVerificationToken          String?            @unique
   emailVerificationTokenExpiresAt DateTime?
-  triggers         Trigger[]
-  pushSubs         PushSubscription[]
-  notifications    Notification[]
-  refreshTokens    RefreshToken[]
-  pinnedCities     PinnedCity[]
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
+  triggers                        Trigger[]
+  pushSubs                        PushSubscription[]
+  notifications                   Notification[]
+  refreshTokens                   RefreshToken[]
+  pinnedCities                    PinnedCity[]
+  createdAt                       DateTime           @default(now())
+  updatedAt                       DateTime           @updatedAt
 }
 
 model Trigger {
-  id          String       @id @default(uuid())
-  userId      String
-  name        String
-  city        String
-  latitude    Float
-  longitude   Float
-  conditionLogic ConditionLogic @default(AND)
-  conditions  TriggerCondition[]
-  channels    Channel[]
-  cooldownMin Int          @default(60)
-  isActive    Boolean      @default(true)
-  state       TriggerState @default(ARMED)
-  lastFiredAt DateTime?
-  lastEvaluatedAt   DateTime?
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id              String             @id @default(uuid())
+  userId          String
+  name            String
+  city            String
+  latitude        Float
+  longitude       Float
+  conditionLogic  ConditionLogic     @default(AND)
+  conditions      TriggerCondition[]
+  notifications   Notification[]
+  channels        Channel[]
+  cooldownMin     Int                @default(60)
+  isActive        Boolean            @default(true)
+  state           TriggerState       @default(ARMED)
+  lastFiredAt     DateTime?
+  lastEvaluatedAt DateTime?
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
 
   @@index([isActive, latitude, longitude])
   @@index([userId])
 }
 
 model TriggerCondition {
-  id        String   @id @default(uuid())
-  triggerId String
-  metric    Metric
-  operator  Operator
-  threshold Float
-  order     Int      @default(0)
+  id                String   @id @default(uuid())
+  triggerId         String
+  metric            Metric
+  operator          Operator
+  threshold         Float
+  order             Int      @default(0)
   lastObservedValue Float?
   lastMatched       Boolean?
-  trigger   Trigger  @relation(fields: [triggerId], references: [id], onDelete: Cascade)
+  trigger           Trigger  @relation(fields: [triggerId], references: [id], onDelete: Cascade)
 
   @@index([triggerId])
 }
 
 model Notification {
   id        String      @id @default(uuid())
-  triggerId String
+  /// Id of the TriggerFiredEvent this row was claimed for. Null only for rows
+  /// written before delivery became idempotent.
+  eventId   String?
+  triggerId String?
   userId    String
   channel   Channel
   status    NotifStatus
   payload   Json
   error     String?
   user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trigger   Trigger?    @relation(fields: [triggerId], references: [id], onDelete: SetNull)
   createdAt DateTime    @default(now())
 
+  /// The claim that makes at-least-once delivery safe: one row per event and
+  /// channel, so a redelivered message finds the existing row instead of
+  /// sending twice.
+  @@unique([eventId, channel])
   @@index([userId, createdAt])
+  @@index([triggerId])
 }
 
 model PushSubscription {
