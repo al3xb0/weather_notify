@@ -9,14 +9,17 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import {
-  evaluateConditions,
   getCounter,
   getHistogram,
-  isWithinQuietHours,
   RabbitPublisherService,
   RedisService,
-  WeatherSnapshot,
 } from '@app/common';
+import {
+  decide,
+  evaluateConditions,
+  QuietHours,
+  WeatherSnapshot,
+} from '@app/domain';
 import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
 import { WeatherService } from './weather/weather.service';
 
@@ -36,6 +39,11 @@ const triggersFired = getCounter(
   'watcher_triggers_fired_total',
   'Total number of triggers fired',
 );
+const triggersSuppressed = getCounter(
+  'watcher_suppressed_total',
+  'Total number of matched triggers whose delivery was withheld',
+  ['reason'],
+);
 
 type QuietHoursUser = {
   quietHoursStart: string | null;
@@ -51,6 +59,14 @@ type EvaluatedCondition = TriggerCondition & {
   matched: boolean;
   observedValue: number;
 };
+
+/** Adapts the joined user row to the domain's quiet-hours window. */
+function quietHoursOf(trigger: WatchedTrigger): QuietHours | null {
+  const u = trigger.user;
+  return u
+    ? { start: u.quietHoursStart, end: u.quietHoursEnd, timezone: u.timezone }
+    : null;
+}
 
 @Injectable()
 export class WatcherService {
@@ -151,46 +167,35 @@ export class WatcherService {
     snapshot: WeatherSnapshot,
   ): Promise<void> {
     triggersEvaluated.inc();
-    const { matched, results } = evaluateConditions(
+    const evaluation = evaluateConditions(
       snapshot,
       trigger.conditions,
       trigger.conditionLogic,
     );
     const evaluatedAt = new Date();
+    const decision = decide(
+      trigger,
+      evaluation,
+      evaluatedAt,
+      quietHoursOf(trigger),
+    );
 
-    if (!matched) {
-      // Re-arm so the next crossing fires again (hysteresis).
-      await this.writeObservation(
-        trigger.id,
-        results,
-        trigger.state === TriggerState.FIRED
-          ? { lastEvaluatedAt: evaluatedAt, state: TriggerState.ARMED }
-          : { lastEvaluatedAt: evaluatedAt },
-      );
+    if (decision.kind === 'FIRE') {
+      await this.fire(trigger, evaluation.results, evaluatedAt);
       return;
     }
-
-    if (!this.shouldFire(trigger)) {
-      // Matched but suppressed by cooldown — still record the observation.
-      await this.writeObservation(trigger.id, results, {
-        lastEvaluatedAt: evaluatedAt,
-      });
-      return;
-    }
-
-    if (this.isQuietHours(trigger)) {
-      // Suppress delivery during quiet hours; stay ARMED so it can still fire
-      // once the window passes if the conditions hold.
-      await this.writeObservation(trigger.id, results, {
-        lastEvaluatedAt: evaluatedAt,
-      });
+    if (decision.kind === 'SUPPRESS') {
+      triggersSuppressed.inc({ reason: decision.reason });
       this.logger.log(
-        `Trigger "${trigger.name}" (${trigger.id}) matched during quiet hours — suppressed`,
+        `Trigger "${trigger.name}" (${trigger.id}) matched but suppressed by ${decision.reason}`,
       );
-      return;
     }
-
-    await this.fire(trigger, results, evaluatedAt);
+    // REARM/SUPPRESS/NOOP all record the observation; only REARM also moves the
+    // trigger back so the next crossing can fire again.
+    await this.writeObservation(trigger.id, evaluation.results, {
+      lastEvaluatedAt: evaluatedAt,
+      ...(decision.kind === 'REARM' ? { state: TriggerState.ARMED } : {}),
+    });
   }
 
   /**
@@ -214,30 +219,6 @@ export class WatcherService {
         data: triggerData,
       }),
     ]);
-  }
-
-  private isQuietHours(trigger: WatchedTrigger): boolean {
-    const u = trigger.user;
-    if (!u) {
-      return false;
-    }
-    return isWithinQuietHours(
-      new Date(),
-      u.quietHoursStart,
-      u.quietHoursEnd,
-      u.timezone,
-    );
-  }
-
-  private shouldFire(trigger: Trigger): boolean {
-    if (trigger.state === TriggerState.ARMED) {
-      return true;
-    }
-    if (!trigger.lastFiredAt) {
-      return true;
-    }
-    const elapsedMs = Date.now() - trigger.lastFiredAt.getTime();
-    return elapsedMs >= trigger.cooldownMin * 60_000;
   }
 
   private async fire(

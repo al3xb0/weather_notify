@@ -32,6 +32,38 @@ export default defineConfig(
     },
   },
   {
+    // The domain layer must stay a pure, dependency-free core: no framework, no
+    // ORM, no IO. Without this rule Prisma quietly leaks back in within a month.
+    files: ['libs/domain/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                '@nestjs/*',
+                '@prisma/*',
+                '@app/*',
+                'node:*',
+                'amqp*',
+                'axios',
+                'ioredis',
+                'nodemailer',
+                'pino*',
+                'prom-client',
+                'rxjs',
+                'web-push',
+              ],
+              message:
+                'libs/domain must not depend on framework, ORM or IO packages.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // Test files assert against untyped HTTP responses (res.body) — relax the
     // unsafe-any family there to keep the suites readable.
     files: ['**/*.spec.ts', '**/*.e2e-spec.ts'],

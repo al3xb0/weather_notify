@@ -1,10 +1,10 @@
-import { ConditionLogic, Metric, Operator } from '@prisma/client';
+import { ConditionLogic, Metric, Operator } from '../enums';
 import {
   evaluateCondition,
   evaluateConditions,
   isSevereWeatherCode,
   WeatherSnapshot,
-} from './condition';
+} from './condition-evaluator';
 
 const snapshot: WeatherSnapshot = {
   temperature: 31,

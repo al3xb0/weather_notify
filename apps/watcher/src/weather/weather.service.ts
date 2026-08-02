@@ -2,7 +2,8 @@ import { HttpService } from '@nestjs/axios';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom, retry } from 'rxjs';
-import { getCounter, RedisService, WeatherSnapshot } from '@app/common';
+import { getCounter, RedisService } from '@app/common';
+import { WeatherSnapshot } from '@app/domain';
 import { openMeteoResponseSchema } from './open-meteo.types';
 
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';

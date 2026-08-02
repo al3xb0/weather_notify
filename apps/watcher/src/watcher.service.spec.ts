@@ -2,18 +2,38 @@ import { TriggerState } from '@prisma/client';
 import { WatcherService } from './watcher.service';
 
 jest.mock('@app/common', () => ({
-  evaluateConditions: jest.fn(),
-  isWithinQuietHours: jest.fn(() => false),
   getCounter: () => ({ inc: jest.fn() }),
   getHistogram: () => ({ startTimer: () => jest.fn() }),
   // Constructor type only; never instantiated under direct unit construction.
   RedisService: class {},
 }));
 
-import { evaluateConditions, isWithinQuietHours } from '@app/common';
+// Condition evaluation is stubbed to drive the orchestrator; the state machine
+// and quiet-hours logic stay real — they are pure and covered on their own.
+jest.mock('@app/domain', () => ({
+  ...jest.requireActual('@app/domain'),
+  evaluateConditions: jest.fn(),
+}));
+
+import { evaluateConditions } from '@app/domain';
 
 const evalMock = evaluateConditions as jest.Mock;
-const quietMock = isWithinQuietHours as jest.Mock;
+
+/** A quiet-hours window that provably contains the current instant. */
+function quietWindowAroundNow(): {
+  quietHoursStart: string;
+  quietHoursEnd: string;
+  timezone: string;
+} {
+  const hhmm = (d: Date) =>
+    `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+  const now = Date.now();
+  return {
+    quietHoursStart: hhmm(new Date(now - 60 * 60_000)),
+    quietHoursEnd: hhmm(new Date(now + 60 * 60_000)),
+    timezone: 'UTC',
+  };
+}
 
 type Mocked = {
   prisma: {
@@ -96,8 +116,6 @@ describe('WatcherService', () => {
     };
     evalMock.mockReset();
     evalMock.mockReturnValue({ matched: true, results: RESULTS });
-    quietMock.mockReset();
-    quietMock.mockReturnValue(false);
 
     service = new WatcherService(
       m.prisma as never,
@@ -249,15 +267,10 @@ describe('WatcherService', () => {
     });
 
     it('suppresses firing during quiet hours but records the observation', async () => {
-      quietMock.mockReturnValue(true);
       await process(
         makeTrigger({
           state: TriggerState.ARMED,
-          user: {
-            quietHoursStart: '22:00',
-            quietHoursEnd: '07:00',
-            timezone: 'UTC',
-          },
+          user: quietWindowAroundNow(),
         }),
       );
       expect(m.publisher.publish).not.toHaveBeenCalled();

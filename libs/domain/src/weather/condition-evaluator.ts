@@ -1,4 +1,4 @@
-import { ConditionLogic, Metric, Operator } from '@prisma/client';
+import { ConditionLogic, Metric, Operator } from '../enums';
 
 export interface WeatherSnapshot {
   temperature: number;
