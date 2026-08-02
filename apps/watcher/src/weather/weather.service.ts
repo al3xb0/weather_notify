@@ -2,12 +2,24 @@ import { HttpService } from '@nestjs/axios';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom, retry } from 'rxjs';
-import { RedisService, WeatherSnapshot } from '@app/common';
+import { getCounter, RedisService, WeatherSnapshot } from '@app/common';
 import { openMeteoResponseSchema } from './open-meteo.types';
 
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 const CURRENT_FIELDS =
   'temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation,weather_code';
+
+const cacheLookups = getCounter(
+  'watcher_weather_cache_total',
+  'Weather snapshot lookups by cache result',
+  ['result'],
+);
+// Counted after the in-flight retry is exhausted, so one increment means the
+// location was actually skipped for this cycle.
+const fetchFailures = getCounter(
+  'watcher_weather_fetch_failures_total',
+  'Failed Open-Meteo snapshot fetches',
+);
 
 @Injectable()
 export class WeatherService {
@@ -29,8 +41,10 @@ export class WeatherService {
     const key = this.cacheKey(latitude, longitude);
     const cached = await this.redis.getJson<WeatherSnapshot>(key);
     if (cached) {
+      cacheLookups.inc({ result: 'hit' });
       return cached;
     }
+    cacheLookups.inc({ result: 'miss' });
     const snapshot = await this.fetch(latitude, longitude);
     await this.redis.setJson(key, snapshot, this.ttl);
     return snapshot;
@@ -42,22 +56,29 @@ export class WeatherService {
 
   private async fetch(lat: number, lon: number): Promise<WeatherSnapshot> {
     // Cap the call and retry once: a slow upstream must not stall the poll cycle.
-    const { data } = await firstValueFrom(
-      this.http
-        .get<unknown>(OPEN_METEO_URL, {
-          params: { latitude: lat, longitude: lon, current: CURRENT_FIELDS },
-          timeout: 5000,
-        })
-        .pipe(retry({ count: 1, delay: 1000 })),
-    );
-    const c = openMeteoResponseSchema.parse(data).current;
-    return {
-      temperature: c.temperature_2m,
-      apparentTemp: c.apparent_temperature,
-      humidity: c.relative_humidity_2m,
-      windSpeed: c.wind_speed_10m,
-      precipitation: c.precipitation,
-      weatherCode: c.weather_code,
-    };
+    // A malformed payload counts as a failure too — both leave us without a
+    // snapshot for this location.
+    try {
+      const { data } = await firstValueFrom(
+        this.http
+          .get<unknown>(OPEN_METEO_URL, {
+            params: { latitude: lat, longitude: lon, current: CURRENT_FIELDS },
+            timeout: 5000,
+          })
+          .pipe(retry({ count: 1, delay: 1000 })),
+      );
+      const c = openMeteoResponseSchema.parse(data).current;
+      return {
+        temperature: c.temperature_2m,
+        apparentTemp: c.apparent_temperature,
+        humidity: c.relative_humidity_2m,
+        windSpeed: c.wind_speed_10m,
+        precipitation: c.precipitation,
+        weatherCode: c.weather_code,
+      };
+    } catch (err) {
+      fetchFailures.inc();
+      throw err;
+    }
   }
 }
