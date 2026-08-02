@@ -16,6 +16,7 @@ import { CoreApiService } from './core-api.service';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { TriggersModule } from './triggers/triggers.module';
+import { MetaModule } from './meta/meta.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PinnedCitiesModule } from './pinned-cities/pinned-cities.module';
 import { AdminModule } from './admin/admin.module';
@@ -36,6 +37,7 @@ import { MetricsModule } from './metrics/metrics.module';
     UsersModule,
     AuthModule,
     TriggersModule,
+    MetaModule,
     NotificationsModule,
     PinnedCitiesModule,
     AdminModule,

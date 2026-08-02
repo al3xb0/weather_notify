@@ -10,8 +10,7 @@ import {
 import type { EventPublisher } from '@app/contracts';
 import { TriggerTestResultDto } from '../dto/trigger-response.dto';
 import { TriggersRepository } from '../triggers.repository';
-
-export const TEST_COOLDOWN_SEC = 600; // 10 minutes
+import { API_LIMITS } from '../../meta/limits';
 
 export class SendTestNotificationCommand extends Command<TriggerTestResultDto> {
   constructor(
@@ -44,7 +43,7 @@ export class SendTestNotificationHandler implements ICommandHandler<
     const trigger = await this.triggers.findOwned(userId, id);
     const retryAfter = await this.redis.consumeCooldown(
       `trigger-test:${userId}`,
-      TEST_COOLDOWN_SEC,
+      API_LIMITS.testCooldownSec,
     );
     if (retryAfter > 0) {
       throw new HttpException(

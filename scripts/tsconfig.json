@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // The apps build as ESM-resolved NodeNext; ts-node runs these one-off
+    // scripts through CommonJS, which is the only difference that matters here.
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "baseUrl": "..",
+    "noEmit": true
+  },
+  "include": ["../scripts/**/*.ts"]
+}

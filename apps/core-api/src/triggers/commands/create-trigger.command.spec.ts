@@ -1,9 +1,11 @@
 import {
   CreateTriggerCommand,
   CreateTriggerHandler,
-  MAX_TRIGGERS_PER_USER,
 } from './create-trigger.command';
 import { CreateTriggerDto } from '../dto/create-trigger.dto';
+import { API_LIMITS } from '../../meta/limits';
+
+const MAX_TRIGGERS_PER_USER = API_LIMITS.maxTriggersPerUser;
 
 const dto = {
   name: 'Heat',

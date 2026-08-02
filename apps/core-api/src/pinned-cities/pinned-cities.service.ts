@@ -2,12 +2,13 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { CreatePinnedCityDto } from './dto/create-pinned-city.dto';
+import { API_LIMITS } from '../meta/limits';
 import {
   PinnedCityResponseDto,
   toPinnedCityResponse,
 } from './dto/pinned-city-response.dto';
 
-const MAX_PINNED_PER_USER = 12;
+const MAX_PINNED_PER_USER = API_LIMITS.maxPinnedCities;
 
 @Injectable()
 export class PinnedCitiesService {

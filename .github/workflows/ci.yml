@@ -60,6 +60,12 @@ jobs:
       - name: Typecheck
         run: npx tsc -p tsconfig.json --noEmit
 
+      # The committed document is what the frontend generates its types from,
+      # so a controller change that is not reflected there fails here rather
+      # than silently shipping a stale client contract.
+      - name: OpenAPI document is up to date
+        run: npm run openapi:check
+
       - name: Build all apps
         run: npm run build:all
 

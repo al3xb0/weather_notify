@@ -15,6 +15,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Channel, ConditionLogic, Metric, Operator } from '@app/contracts';
+import { API_LIMITS } from '../../meta/limits';
 
 export class ConditionDto {
   @IsEnum(Metric)
@@ -48,7 +49,7 @@ export class CreateTriggerDto {
 
   @IsArray()
   @ArrayNotEmpty()
-  @ArrayMaxSize(5)
+  @ArrayMaxSize(API_LIMITS.maxConditionsPerTrigger)
   @ValidateNested({ each: true })
   @Type(() => ConditionDto)
   conditions!: ConditionDto[];
@@ -59,13 +60,14 @@ export class CreateTriggerDto {
 
   @IsArray()
   @ArrayNotEmpty()
+  @ArrayMaxSize(API_LIMITS.maxChannelsPerTrigger)
   @IsEnum(Channel, { each: true })
   channels!: Channel[];
 
   @IsOptional()
   @IsInt()
-  @Min(10)
-  @Max(1440)
+  @Min(API_LIMITS.minCooldownMin)
+  @Max(API_LIMITS.maxCooldownMin)
   cooldownMin?: number;
 
   @IsOptional()

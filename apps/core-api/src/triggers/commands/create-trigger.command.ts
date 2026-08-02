@@ -6,8 +6,9 @@ import {
   TriggerResponseDto,
 } from '../dto/trigger-response.dto';
 import { TriggersRepository } from '../triggers.repository';
+import { API_LIMITS } from '../../meta/limits';
 
-export const MAX_TRIGGERS_PER_USER = 10;
+const { maxTriggersPerUser } = API_LIMITS;
 
 export class CreateTriggerCommand extends Command<TriggerResponseDto> {
   constructor(
@@ -35,9 +36,9 @@ export class CreateTriggerHandler implements ICommandHandler<
         'Please verify your email before creating triggers',
       );
     }
-    if ((await this.triggers.countForUser(userId)) >= MAX_TRIGGERS_PER_USER) {
+    if ((await this.triggers.countForUser(userId)) >= maxTriggersPerUser) {
       throw new BadRequestException(
-        `Trigger limit reached (max ${MAX_TRIGGERS_PER_USER})`,
+        `Trigger limit reached (max ${maxTriggersPerUser})`,
       );
     }
     const { conditions, conditionLogic, ...rest } = dto;

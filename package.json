@@ -21,6 +21,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:e2e": "jest --config ./apps/core-api/test/jest-e2e.json",
+    "openapi": "ts-node -P scripts/tsconfig.json -r tsconfig-paths/register scripts/generate-openapi.ts",
+    "openapi:check": "npm run openapi && git diff --exit-code openapi.json",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
