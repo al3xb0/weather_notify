@@ -11,8 +11,12 @@ import {
   RedisModule,
   watcherEnvSchema,
 } from '@app/common';
+import { EVENT_PUBLISHER } from '@app/contracts';
 import { WatcherService } from './watcher.service';
-import { WeatherService } from './weather/weather.service';
+import { OpenMeteoWeatherProvider } from './weather/open-meteo.provider';
+import { PrismaWatchedTriggerRepository } from './persistence/prisma-watched-trigger.repository';
+import { WATCHED_TRIGGER_REPOSITORY } from './ports/watched-trigger.repository';
+import { WEATHER_PROVIDER } from './ports/weather-provider.port';
 
 @Module({
   imports: [
@@ -26,6 +30,18 @@ import { WeatherService } from './weather/weather.service';
     DatabaseModule,
     RedisModule,
   ],
-  providers: [WatcherService, WeatherService, RabbitPublisherService],
+  providers: [
+    WatcherService,
+    // Adapters are bound to their ports here; WatcherService names only tokens.
+    OpenMeteoWeatherProvider,
+    { provide: WEATHER_PROVIDER, useExisting: OpenMeteoWeatherProvider },
+    PrismaWatchedTriggerRepository,
+    {
+      provide: WATCHED_TRIGGER_REPOSITORY,
+      useExisting: PrismaWatchedTriggerRepository,
+    },
+    RabbitPublisherService,
+    { provide: EVENT_PUBLISHER, useExisting: RabbitPublisherService },
+  ],
 })
 export class WatcherModule {}

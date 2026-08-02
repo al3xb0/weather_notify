@@ -1,10 +1,19 @@
 import {
+  Channel as PrismaChannel,
   ConditionLogic as PrismaConditionLogic,
   Metric as PrismaMetric,
+  NotifStatus as PrismaNotifStatus,
   Operator as PrismaOperator,
   TriggerState as PrismaTriggerState,
 } from '@prisma/client';
-import { ConditionLogic, Metric, Operator, TriggerState } from '@app/domain';
+import {
+  Channel,
+  ConditionLogic,
+  Metric,
+  NotifStatus,
+  Operator,
+  TriggerState,
+} from '@app/domain';
 
 /** Mutual assignability — `never` (and thus a compile error) on any drift. */
 type AssertEqual<A, B> = [A] extends [B]
@@ -24,4 +33,6 @@ export const DOMAIN_ENUMS_MATCH_PRISMA: [
   AssertEqual<Operator, PrismaOperator>,
   AssertEqual<ConditionLogic, PrismaConditionLogic>,
   AssertEqual<TriggerState, PrismaTriggerState>,
-] = [true, true, true, true];
+  AssertEqual<Channel, PrismaChannel>,
+  AssertEqual<NotifStatus, PrismaNotifStatus>,
+] = [true, true, true, true, true, true];

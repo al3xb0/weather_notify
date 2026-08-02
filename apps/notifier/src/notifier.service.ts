@@ -1,12 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import { getCounter, getHistogram } from '@app/common';
 import { Channel, NotifStatus, TriggerFiredEvent } from '@app/contracts';
-import { NotificationChannel } from './channels/channel.types';
-import { TelegramChannel } from './channels/telegram.channel';
-import { EmailChannel } from './channels/email.channel';
-import { WebPushChannel } from './channels/webpush.channel';
+import { CHANNEL_REGISTRY } from './channels/channel.registry';
+import type { ChannelRegistry } from './channels/channel.registry';
+import { PermanentNotificationError } from './channels/channel.types';
 
 const notificationsTotal = getCounter(
   'notifier_notifications_total',
@@ -25,28 +24,30 @@ const deliveryDuration = getHistogram(
 
 @Injectable()
 export class NotifierService {
-  private readonly senders: Record<Channel, NotificationChannel>;
-
   constructor(
     private readonly prisma: PrismaService,
-    telegram: TelegramChannel,
-    email: EmailChannel,
-    webpush: WebPushChannel,
-  ) {
-    this.senders = {
-      TELEGRAM: telegram,
-      EMAIL: email,
-      WEB_PUSH: webpush,
-    };
+    @Inject(CHANNEL_REGISTRY) private readonly senders: ChannelRegistry,
+  ) {}
+
+  /** Channels with a registered implementation, in registration order. */
+  registeredChannels(): Channel[] {
+    return [...this.senders.keys()];
   }
 
   /** Send through a single channel; throws on failure (caller handles retry). */
   async dispatch(channel: Channel, event: TriggerFiredEvent): Promise<void> {
+    const sender = this.senders.get(channel);
+    if (!sender) {
+      // Retrying cannot conjure an implementation — fail the message outright.
+      throw new PermanentNotificationError(
+        `No implementation registered for channel ${channel}`,
+      );
+    }
     // Times the channel call only — the history write below is our own DB and
     // would otherwise be counted as delivery latency.
     const endTimer = deliveryDuration.startTimer({ channel });
     try {
-      await this.senders[channel].send(event);
+      await sender.send(event);
     } catch (err) {
       endTimer({ outcome: 'failure' });
       throw err;

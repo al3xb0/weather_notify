@@ -3,14 +3,21 @@ import {
   ForbiddenException,
   HttpException,
   HttpStatus,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { Channel, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
-import { RabbitPublisherService, RedisService } from '@app/common';
-import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
+import { RedisService } from '@app/common';
+import {
+  Channel,
+  EVENT_PUBLISHER,
+  routingKeyFor,
+  TriggerFiredEvent,
+} from '@app/contracts';
+import type { EventPublisher } from '@app/contracts';
 import { ConditionDto, CreateTriggerDto } from './dto/create-trigger.dto';
 import { UpdateTriggerDto } from './dto/update-trigger.dto';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
@@ -38,7 +45,7 @@ function conditionRows(conditions: ConditionDto[]) {
 export class TriggersService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly publisher: RabbitPublisherService,
+    @Inject(EVENT_PUBLISHER) private readonly publisher: EventPublisher,
     private readonly redis: RedisService,
   ) {}
 

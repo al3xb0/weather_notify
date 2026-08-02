@@ -1,27 +1,28 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
-import {
-  Prisma,
-  Trigger,
-  TriggerCondition,
-  TriggerState,
-} from '@prisma/client';
-import { PrismaService } from '@app/database';
-import {
-  getCounter,
-  getHistogram,
-  RabbitPublisherService,
-  RedisService,
-} from '@app/common';
+import { getCounter, getHistogram, RedisService } from '@app/common';
 import {
   decide,
+  EvaluatedCondition,
   evaluateConditions,
-  QuietHours,
+  TriggerState,
   WeatherSnapshot,
 } from '@app/domain';
-import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
-import { WeatherService } from './weather/weather.service';
+import {
+  EVENT_PUBLISHER,
+  routingKeyFor,
+  TriggerFiredEvent,
+} from '@app/contracts';
+import type { EventPublisher } from '@app/contracts';
+import { WATCHED_TRIGGER_REPOSITORY } from './ports/watched-trigger.repository';
+import type {
+  WatchedCondition,
+  WatchedTrigger,
+  WatchedTriggerRepository,
+} from './ports/watched-trigger.repository';
+import { WEATHER_PROVIDER } from './ports/weather-provider.port';
+import type { WeatherProvider } from './ports/weather-provider.port';
 
 const CYCLE_LOCK_KEY = 'watcher:cycle:lock';
 // Auto-expires if a cycle crashes without releasing; longer than any sane run.
@@ -45,37 +46,19 @@ const triggersSuppressed = getCounter(
   ['reason'],
 );
 
-type QuietHoursUser = {
-  quietHoursStart: string | null;
-  quietHoursEnd: string | null;
-  timezone: string | null;
-};
-// Conditions and the user's quiet-hours window are joined onto each trigger.
-type WatchedTrigger = Trigger & {
-  conditions: TriggerCondition[];
-  user?: QuietHoursUser;
-};
-type EvaluatedCondition = TriggerCondition & {
-  matched: boolean;
-  observedValue: number;
-};
-
-/** Adapts the joined user row to the domain's quiet-hours window. */
-function quietHoursOf(trigger: WatchedTrigger): QuietHours | null {
-  const u = trigger.user;
-  return u
-    ? { start: u.quietHoursStart, end: u.quietHoursEnd, timezone: u.timezone }
-    : null;
-}
+type EvaluatedWatchedCondition = EvaluatedCondition<WatchedCondition>;
 
 @Injectable()
 export class WatcherService {
   private readonly logger = new Logger(WatcherService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly weather: WeatherService,
-    private readonly publisher: RabbitPublisherService,
+    @Inject(WATCHED_TRIGGER_REPOSITORY)
+    private readonly triggers: WatchedTriggerRepository,
+    @Inject(WEATHER_PROVIDER)
+    private readonly weather: WeatherProvider,
+    @Inject(EVENT_PUBLISHER)
+    private readonly publisher: EventPublisher,
     private readonly redis: RedisService,
   ) {}
 
@@ -107,19 +90,7 @@ export class WatcherService {
   }
 
   private async poll(): Promise<void> {
-    const triggers = await this.prisma.trigger.findMany({
-      where: { isActive: true },
-      include: {
-        conditions: { orderBy: { order: 'asc' } },
-        user: {
-          select: {
-            quietHoursStart: true,
-            quietHoursEnd: true,
-            timezone: true,
-          },
-        },
-      },
-    });
+    const triggers = await this.triggers.findActive();
     if (triggers.length === 0) {
       return;
     }
@@ -177,7 +148,7 @@ export class WatcherService {
       trigger,
       evaluation,
       evaluatedAt,
-      quietHoursOf(trigger),
+      trigger.quietHours,
     );
 
     if (decision.kind === 'FIRE') {
@@ -192,38 +163,15 @@ export class WatcherService {
     }
     // REARM/SUPPRESS/NOOP all record the observation; only REARM also moves the
     // trigger back so the next crossing can fire again.
-    await this.writeObservation(trigger.id, evaluation.results, {
+    await this.triggers.recordObservation(trigger.id, evaluation.results, {
       lastEvaluatedAt: evaluatedAt,
       ...(decision.kind === 'REARM' ? { state: TriggerState.ARMED } : {}),
     });
   }
 
-  /**
-   * Persist per-condition observations plus any trigger-level state change in a
-   * single transaction. Write volume is small (≤20 triggers, few conditions).
-   */
-  private async writeObservation(
-    triggerId: string,
-    results: EvaluatedCondition[],
-    triggerData: Prisma.TriggerUpdateInput,
-  ): Promise<void> {
-    await this.prisma.$transaction([
-      ...results.map((r) =>
-        this.prisma.triggerCondition.update({
-          where: { id: r.id },
-          data: { lastObservedValue: r.observedValue, lastMatched: r.matched },
-        }),
-      ),
-      this.prisma.trigger.update({
-        where: { id: triggerId },
-        data: triggerData,
-      }),
-    ]);
-  }
-
   private async fire(
     trigger: WatchedTrigger,
-    results: EvaluatedCondition[],
+    results: EvaluatedWatchedCondition[],
     evaluatedAt: Date,
   ): Promise<void> {
     const event: TriggerFiredEvent = {
@@ -247,7 +195,7 @@ export class WatcherService {
       await this.publisher.publish(routingKeyFor(channel), event);
     }
 
-    await this.writeObservation(trigger.id, results, {
+    await this.triggers.recordObservation(trigger.id, results, {
       lastEvaluatedAt: evaluatedAt,
       state: TriggerState.FIRED,
       lastFiredAt: new Date(),

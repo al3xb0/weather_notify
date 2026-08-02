@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@app/database';
 import { MailService } from '@app/common';
-import { TriggerFiredEvent } from '@app/contracts';
+import { Channel, TriggerFiredEvent } from '@app/contracts';
 import {
   NotificationChannel,
   PermanentNotificationError,
@@ -10,6 +10,8 @@ import { alertHtml, alertTitle } from './format';
 
 @Injectable()
 export class EmailChannel implements NotificationChannel {
+  readonly channel = Channel.EMAIL;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly mail: MailService,

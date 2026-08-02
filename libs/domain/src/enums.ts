@@ -36,3 +36,16 @@ export const TriggerState = {
   FIRED: 'FIRED',
 } as const;
 export type TriggerState = (typeof TriggerState)[keyof typeof TriggerState];
+
+export const Channel = {
+  TELEGRAM: 'TELEGRAM',
+  EMAIL: 'EMAIL',
+  WEB_PUSH: 'WEB_PUSH',
+} as const;
+export type Channel = (typeof Channel)[keyof typeof Channel];
+
+export const NotifStatus = {
+  SENT: 'SENT',
+  FAILED: 'FAILED',
+} as const;
+export type NotifStatus = (typeof NotifStatus)[keyof typeof NotifStatus];

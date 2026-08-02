@@ -1,4 +1,4 @@
-import { Channel } from '@prisma/client';
+import { Channel } from '@app/domain';
 
 export const NOTIFICATIONS_EXCHANGE = 'notifications';
 

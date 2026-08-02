@@ -24,8 +24,6 @@ import { getCounter } from '@app/common';
 import { NotifierService } from '../notifier.service';
 import { PermanentNotificationError } from '../channels/channel.types';
 
-const CHANNELS: Channel[] = ['TELEGRAM', 'EMAIL', 'WEB_PUSH'];
-
 const retriesTotal = getCounter(
   'notifier_retries_total',
   'Total notification delivery retries by channel',
@@ -68,7 +66,9 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
     await ch.assertExchange(DLX_EXCHANGE, 'topic', { durable: true });
     await ch.prefetch(this.prefetch);
 
-    for (const channel of CHANNELS) {
+    // Topology follows the registry: a newly registered channel gets its queues
+    // and consumer without another list to keep in sync.
+    for (const channel of this.notifier.registeredChannels()) {
       const queue = queueNameFor(channel);
       const retryQueue = `${queue}.retry`;
       const firedKey = routingKeyFor(channel);

@@ -1,6 +1,6 @@
 jest.mock('@app/common', () => ({
-  // Type-only at runtime; the real publisher is injected as a mock below.
-  RabbitPublisherService: class {},
+  // Constructor type only; the fakes below are injected directly.
+  RedisService: class {},
 }));
 
 import { TriggersService } from './triggers.service';
@@ -44,11 +44,7 @@ describe('TriggersService', () => {
     };
     publisher = { publish: jest.fn().mockResolvedValue(undefined) };
     redis = { consumeCooldown: jest.fn().mockResolvedValue(0) };
-    service = new TriggersService(
-      prisma as never,
-      publisher as never,
-      redis as never,
-    );
+    service = new TriggersService(prisma as never, publisher, redis as never);
   });
 
   describe('create soft-gate', () => {

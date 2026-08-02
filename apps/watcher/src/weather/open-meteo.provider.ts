@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { firstValueFrom, retry } from 'rxjs';
 import { getCounter, RedisService } from '@app/common';
 import { WeatherSnapshot } from '@app/domain';
+import { WeatherProvider } from '../ports/weather-provider.port';
 import { openMeteoResponseSchema } from './open-meteo.types';
 
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
@@ -23,7 +24,7 @@ const fetchFailures = getCounter(
 );
 
 @Injectable()
-export class WeatherService {
+export class OpenMeteoWeatherProvider implements WeatherProvider {
   private readonly ttl: number;
 
   constructor(

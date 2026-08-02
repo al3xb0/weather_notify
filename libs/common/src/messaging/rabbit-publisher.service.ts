@@ -10,14 +10,20 @@ import amqp, {
   ChannelWrapper,
 } from 'amqp-connection-manager';
 import { ConfirmChannel } from 'amqplib';
-import { NOTIFICATIONS_EXCHANGE, TriggerFiredEvent } from '@app/contracts';
+import {
+  EventPublisher,
+  NOTIFICATIONS_EXCHANGE,
+  TriggerFiredEvent,
+} from '@app/contracts';
 
 /**
- * Shared RabbitMQ publisher for the notifications topic exchange. Used by the
- * watcher (fired events) and core-api (test notifications).
+ * RabbitMQ adapter for the `EventPublisher` port, backed by the notifications
+ * topic exchange. Used by the watcher (fired events) and core-api (test sends).
  */
 @Injectable()
-export class RabbitPublisherService implements OnModuleInit, OnModuleDestroy {
+export class RabbitPublisherService
+  implements EventPublisher, OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(RabbitPublisherService.name);
   private connection!: AmqpConnectionManager;
   private channel!: ChannelWrapper;

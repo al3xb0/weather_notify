@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import webpush from 'web-push';
 import { PrismaService } from '@app/database';
-import { TriggerFiredEvent } from '@app/contracts';
+import { Channel, TriggerFiredEvent } from '@app/contracts';
 import {
   NotificationChannel,
   PermanentNotificationError,
@@ -11,6 +11,7 @@ import { alertText, alertTitle } from './format';
 
 @Injectable()
 export class WebPushChannel implements NotificationChannel {
+  readonly channel = Channel.WEB_PUSH;
   private readonly logger = new Logger(WebPushChannel.name);
   private readonly configured: boolean;
 

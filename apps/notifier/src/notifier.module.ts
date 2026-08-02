@@ -11,9 +11,7 @@ import {
 } from '@app/common';
 import { NotifierService } from './notifier.service';
 import { RabbitConsumerService } from './messaging/rabbit-consumer.service';
-import { TelegramChannel } from './channels/telegram.channel';
-import { EmailChannel } from './channels/email.channel';
-import { WebPushChannel } from './channels/webpush.channel';
+import { channelProviders } from './channels/channel.registry';
 
 @Module({
   imports: [
@@ -28,9 +26,7 @@ import { WebPushChannel } from './channels/webpush.channel';
   providers: [
     NotifierService,
     RabbitConsumerService,
-    TelegramChannel,
-    EmailChannel,
-    WebPushChannel,
+    ...channelProviders,
     MailService,
   ],
 })

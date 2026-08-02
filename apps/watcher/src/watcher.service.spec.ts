@@ -1,5 +1,5 @@
-import { TriggerState } from '@prisma/client';
 import { WatcherService } from './watcher.service';
+import type { WatchedTrigger } from './ports/watched-trigger.repository';
 
 jest.mock('@app/common', () => ({
   getCounter: () => ({ inc: jest.fn() }),
@@ -15,38 +15,30 @@ jest.mock('@app/domain', () => ({
   evaluateConditions: jest.fn(),
 }));
 
-import { evaluateConditions } from '@app/domain';
+import { evaluateConditions, TriggerState } from '@app/domain';
 
 const evalMock = evaluateConditions as jest.Mock;
 
-/** A quiet-hours window that provably contains the current instant. */
-function quietWindowAroundNow(): {
-  quietHoursStart: string;
-  quietHoursEnd: string;
-  timezone: string;
-} {
-  const hhmm = (d: Date) =>
-    `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
-  const now = Date.now();
-  return {
-    quietHoursStart: hhmm(new Date(now - 60 * 60_000)),
-    quietHoursEnd: hhmm(new Date(now + 60 * 60_000)),
-    timezone: 'UTC',
-  };
-}
-
 type Mocked = {
-  prisma: {
-    trigger: { findMany: jest.Mock; update: jest.Mock };
-    triggerCondition: { update: jest.Mock };
-    $transaction: jest.Mock;
-  };
+  triggers: { findActive: jest.Mock; recordObservation: jest.Mock };
   weather: { getSnapshot: jest.Mock };
   publisher: { publish: jest.Mock };
   redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
 };
 
-function makeTrigger(overrides: Record<string, unknown> = {}): never {
+/** A quiet-hours window that provably contains the current instant. */
+function quietWindowAroundNow() {
+  const hhmm = (d: Date) =>
+    `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+  const now = Date.now();
+  return {
+    start: hhmm(new Date(now - 60 * 60_000)),
+    end: hhmm(new Date(now + 60 * 60_000)),
+    timezone: 'UTC',
+  };
+}
+
+function makeTrigger(overrides: Partial<WatchedTrigger> = {}): WatchedTrigger {
   return {
     id: 't1',
     userId: 'u1',
@@ -56,39 +48,23 @@ function makeTrigger(overrides: Record<string, unknown> = {}): never {
     longitude: 13.405,
     conditionLogic: 'AND',
     conditions: [
-      {
-        id: 'c1',
-        triggerId: 't1',
-        metric: 'TEMPERATURE',
-        operator: 'GT',
-        threshold: 30,
-        order: 0,
-        lastObservedValue: null,
-        lastMatched: null,
-      },
+      { id: 'c1', metric: 'TEMPERATURE', operator: 'GT', threshold: 30 },
     ],
     channels: ['TELEGRAM'],
     cooldownMin: 30,
-    isActive: true,
     state: TriggerState.ARMED,
     lastFiredAt: null,
-    lastEvaluatedAt: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    quietHours: null,
     ...overrides,
-  } as never;
+  };
 }
 
 const RESULTS = [
   {
     id: 'c1',
-    triggerId: 't1',
     metric: 'TEMPERATURE',
     operator: 'GT',
     threshold: 30,
-    order: 0,
-    lastObservedValue: null,
-    lastMatched: null,
     observedValue: 35,
     matched: true,
   },
@@ -102,10 +78,9 @@ describe('WatcherService', () => {
 
   beforeEach(() => {
     m = {
-      prisma: {
-        trigger: { findMany: jest.fn(), update: jest.fn().mockReturnValue({}) },
-        triggerCondition: { update: jest.fn().mockReturnValue({}) },
-        $transaction: jest.fn().mockResolvedValue([]),
+      triggers: {
+        findActive: jest.fn(),
+        recordObservation: jest.fn().mockResolvedValue(undefined),
       },
       weather: { getSnapshot: jest.fn().mockResolvedValue(SNAPSHOT) },
       publisher: { publish: jest.fn().mockResolvedValue(undefined) },
@@ -117,10 +92,11 @@ describe('WatcherService', () => {
     evalMock.mockReset();
     evalMock.mockReturnValue({ matched: true, results: RESULTS });
 
+    // No casts needed on the three ports — the fakes satisfy the interfaces.
     service = new WatcherService(
-      m.prisma as never,
-      m.weather as never,
-      m.publisher as never,
+      m.triggers,
+      m.weather,
+      m.publisher,
       m.redis as never,
     );
   });
@@ -129,12 +105,12 @@ describe('WatcherService', () => {
     it('skips the cycle when the lock is already held', async () => {
       m.redis.acquireLock.mockResolvedValue(null);
       await service.runCycle();
-      expect(m.prisma.trigger.findMany).not.toHaveBeenCalled();
+      expect(m.triggers.findActive).not.toHaveBeenCalled();
       expect(m.redis.releaseLock).not.toHaveBeenCalled();
     });
 
     it('releases the lock with its token after a normal cycle', async () => {
-      m.prisma.trigger.findMany.mockResolvedValue([]);
+      m.triggers.findActive.mockResolvedValue([]);
       await service.runCycle();
       expect(m.redis.releaseLock).toHaveBeenCalledWith(
         'watcher:cycle:lock',
@@ -143,7 +119,7 @@ describe('WatcherService', () => {
     });
 
     it('releases the lock even when polling throws', async () => {
-      m.prisma.trigger.findMany.mockRejectedValue(new Error('db down'));
+      m.triggers.findActive.mockRejectedValue(new Error('db down'));
       await expect(service.runCycle()).rejects.toThrow('db down');
       expect(m.redis.releaseLock).toHaveBeenCalledWith(
         'watcher:cycle:lock',
@@ -155,7 +131,7 @@ describe('WatcherService', () => {
   describe('location grouping', () => {
     it('fetches weather once for co-located triggers', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
-      m.prisma.trigger.findMany.mockResolvedValue([
+      m.triggers.findActive.mockResolvedValue([
         makeTrigger({ id: 'a', latitude: 52.521, longitude: 13.405 }),
         makeTrigger({ id: 'b', latitude: 52.524, longitude: 13.4049 }),
       ]);
@@ -167,7 +143,7 @@ describe('WatcherService', () => {
 
     it('fetches weather per distinct location', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
-      m.prisma.trigger.findMany.mockResolvedValue([
+      m.triggers.findActive.mockResolvedValue([
         makeTrigger({ id: 'a', latitude: 52.52, longitude: 13.4 }),
         makeTrigger({ id: 'b', latitude: 48.13, longitude: 11.57 }),
       ]);
@@ -180,7 +156,7 @@ describe('WatcherService', () => {
       m.weather.getSnapshot
         .mockRejectedValueOnce(new Error('upstream 500'))
         .mockResolvedValueOnce(SNAPSHOT);
-      m.prisma.trigger.findMany.mockResolvedValue([
+      m.triggers.findActive.mockResolvedValue([
         makeTrigger({ id: 'a', latitude: 52.52, longitude: 13.4 }),
         makeTrigger({ id: 'b', latitude: 48.13, longitude: 11.57 }),
       ]);
@@ -191,24 +167,26 @@ describe('WatcherService', () => {
   });
 
   describe('firing state machine', () => {
-    async function process(trigger: never): Promise<void> {
-      m.prisma.trigger.findMany.mockResolvedValue([trigger]);
+    async function process(trigger: WatchedTrigger): Promise<void> {
+      m.triggers.findActive.mockResolvedValue([trigger]);
       await service.runCycle();
     }
 
-    const triggerUpdate = () => m.prisma.trigger.update.mock.calls[0][0];
+    const written = () =>
+      m.triggers.recordObservation.mock.calls[0] as [
+        string,
+        unknown,
+        Record<string, unknown>,
+      ];
 
     it('fires an ARMED trigger and transitions it to FIRED', async () => {
       await process(makeTrigger({ state: TriggerState.ARMED }));
       expect(m.publisher.publish).toHaveBeenCalledTimes(1);
-      const update = triggerUpdate();
-      expect(update.where).toEqual({ id: 't1' });
-      expect(update.data.state).toBe(TriggerState.FIRED);
-      expect(update.data.lastFiredAt).toBeInstanceOf(Date);
-      expect(m.prisma.triggerCondition.update).toHaveBeenCalledWith({
-        where: { id: 'c1' },
-        data: { lastObservedValue: 35, lastMatched: true },
-      });
+      const [id, observations, patch] = written();
+      expect(id).toBe('t1');
+      expect(observations).toEqual(RESULTS);
+      expect(patch.state).toBe(TriggerState.FIRED);
+      expect(patch.lastFiredAt).toBeInstanceOf(Date);
     });
 
     it('records the observation but does not re-fire inside cooldown', async () => {
@@ -220,11 +198,10 @@ describe('WatcherService', () => {
         }),
       );
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      const update = triggerUpdate();
-      expect(update.data.state).toBeUndefined();
-      expect(update.data.lastFiredAt).toBeUndefined();
-      expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
-      expect(m.prisma.triggerCondition.update).toHaveBeenCalledTimes(1);
+      const [, , patch] = written();
+      expect(patch.state).toBeUndefined();
+      expect(patch.lastFiredAt).toBeUndefined();
+      expect(patch.lastEvaluatedAt).toBeInstanceOf(Date);
     });
 
     it('re-fires a FIRED trigger once its cooldown has elapsed', async () => {
@@ -236,7 +213,7 @@ describe('WatcherService', () => {
         }),
       );
       expect(m.publisher.publish).toHaveBeenCalledTimes(1);
-      expect(triggerUpdate().data.state).toBe(TriggerState.FIRED);
+      expect(written()[2].state).toBe(TriggerState.FIRED);
     });
 
     it('fires a FIRED trigger that has no recorded lastFiredAt', async () => {
@@ -250,32 +227,31 @@ describe('WatcherService', () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
       await process(makeTrigger({ state: TriggerState.FIRED }));
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      const update = triggerUpdate();
-      expect(update.where).toEqual({ id: 't1' });
-      expect(update.data.state).toBe(TriggerState.ARMED);
-      expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
+      const [id, , patch] = written();
+      expect(id).toBe('t1');
+      expect(patch.state).toBe(TriggerState.ARMED);
+      expect(patch.lastEvaluatedAt).toBeInstanceOf(Date);
     });
 
     it('records the observation for an unmatched ARMED trigger without firing', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
       await process(makeTrigger({ state: TriggerState.ARMED }));
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      const update = triggerUpdate();
-      expect(update.data.state).toBeUndefined();
-      expect(update.data.lastEvaluatedAt).toBeInstanceOf(Date);
-      expect(m.prisma.triggerCondition.update).toHaveBeenCalledTimes(1);
+      const [, , patch] = written();
+      expect(patch.state).toBeUndefined();
+      expect(patch.lastEvaluatedAt).toBeInstanceOf(Date);
     });
 
     it('suppresses firing during quiet hours but records the observation', async () => {
       await process(
         makeTrigger({
           state: TriggerState.ARMED,
-          user: quietWindowAroundNow(),
+          quietHours: quietWindowAroundNow(),
         }),
       );
       expect(m.publisher.publish).not.toHaveBeenCalled();
-      expect(triggerUpdate().data.state).toBeUndefined();
-      expect(m.prisma.triggerCondition.update).toHaveBeenCalledTimes(1);
+      expect(written()[2].state).toBeUndefined();
+      expect(m.triggers.recordObservation).toHaveBeenCalledTimes(1);
     });
 
     it('fans the event out to every enabled channel', async () => {

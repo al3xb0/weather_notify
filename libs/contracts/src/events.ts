@@ -1,4 +1,4 @@
-import { Channel, ConditionLogic, Metric, Operator } from '@prisma/client';
+import { Channel, ConditionLogic, Metric, Operator } from '@app/domain';
 
 /** A single evaluated condition carried in a fired event. */
 export interface FiredCondition {

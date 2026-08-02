@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '@app/database';
-import { TriggerFiredEvent } from '@app/contracts';
+import { Channel, TriggerFiredEvent } from '@app/contracts';
 import {
   NotificationChannel,
   PermanentNotificationError,
@@ -12,6 +12,7 @@ import { alertText } from './format';
 
 @Injectable()
 export class TelegramChannel implements NotificationChannel {
+  readonly channel = Channel.TELEGRAM;
   private readonly token: string;
 
   constructor(
