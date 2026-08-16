@@ -32,7 +32,7 @@ flowchart LR
 
 | Service | Role |
 |---------|------|
-| **core-api** | REST API: JWT auth, triggers CRUD, user/Telegram/push management, notifications history, Swagger (dev only) |
+| **core-api** | REST API: JWT auth, triggers CRUD, user/Telegram/push management, notifications history, the Open-Meteo proxy the UI reads through, Swagger (dev only) |
 | **watcher** | `@Cron` job: groups active triggers by location, polls Open-Meteo (Redis-cached), evaluates conditions, publishes `trigger.fired` |
 | **notifier** | Consumes per-channel queues, delivers via Telegram/Email/Web Push with retry/DLQ, persists every outcome |
 
@@ -498,6 +498,17 @@ re-evaluates data the previous one already acted upon — writes and wall time
 spent on a decision that cannot come out differently. Open-Meteo accepts batched
 coordinates, which is where this goes if the location count grows faster than
 the cache absorbs it.
+
+**The UI's own Open-Meteo calls go through the API.** City search and the
+weather page used to call Open-Meteo from the browser, which made a third
+party's CORS policy, quota and uptime part of the app's critical path — and put
+the failure where only users could see it. `GET /geocode` and `GET /weather`
+proxy both, cached in Redis (24h for coordinates, which do not move; 5 minutes
+for a forecast someone is looking at) and rate-limited per caller. The forecast
+cache is keyed by the same two-decimal rounding the watcher groups triggers by,
+so two people viewing one city cost one upstream call. That also let the
+frontend's CSP drop its `*.open-meteo.com` wildcard: the browser now talks to
+one origin.
 
 **Notification history lives in the primary database.** It is append-only, never
 joined against, and read as one paginated list. It will outgrow the tables the API
