@@ -8,6 +8,15 @@ import { WeatherProvider } from '../ports/weather-provider.port';
 import { openMeteoResponseSchema } from './open-meteo.types';
 
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
+
+/**
+ * Must stay below the poll interval, or a cycle decides on a snapshot the
+ * previous cycle already acted upon: at the old 600s against a 5-minute cron,
+ * every second cycle re-evaluated identical data and could not change its mind.
+ * Below it rather than equal to it, since the entry is written a moment after
+ * the cycle starts and would otherwise still be alive when the next one asks.
+ */
+const DEFAULT_CACHE_TTL_SEC = 240;
 const CURRENT_FIELDS =
   'temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation,weather_code';
 
@@ -32,7 +41,11 @@ export class OpenMeteoWeatherProvider implements WeatherProvider {
     private readonly redis: RedisService,
     config: ConfigService,
   ) {
-    this.ttl = Number(config.get('WEATHER_CACHE_TTL_SEC') ?? 600);
+    const configured = Number(config.get('WEATHER_CACHE_TTL_SEC'));
+    this.ttl =
+      Number.isFinite(configured) && configured > 0
+        ? configured
+        : DEFAULT_CACHE_TTL_SEC;
   }
 
   /** Snapshot for a location, served from Redis cache (deduped across triggers). */

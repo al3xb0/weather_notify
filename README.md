@@ -434,10 +434,13 @@ take over within the lock's TTL if the poller stops. A webhook would remove the
 election entirely, at the cost of a publicly reachable HTTPS endpoint.
 
 **Open-Meteo is polled per location, sequentially.** Locations are deduplicated
-(triggers rounded to two decimals share one call) and cached in Redis for ten
-minutes, so the current cost is low. Open-Meteo accepts batched coordinates,
-which is where this goes if the location count grows faster than the cache
-absorbs it.
+(triggers rounded to two decimals share one call) and cached in Redis for four
+minutes, so the current cost is low. The TTL is deliberately under the poll
+interval: a longer-lived entry is handed back to the next cycle, which then
+re-evaluates data the previous one already acted upon — writes and wall time
+spent on a decision that cannot come out differently. Open-Meteo accepts batched
+coordinates, which is where this goes if the location count grows faster than
+the cache absorbs it.
 
 **Notification history lives in the primary database.** It is append-only, never
 joined against, and read as one paginated list. It will outgrow the tables the API
