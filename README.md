@@ -405,6 +405,12 @@ rather than by design, so a second instance would idle instead of sharing load.
 Sharding by a hash of the location would let instances split the trigger set with
 no coordination, since triggers are already grouped by location.
 
+**Telegram polling is single-instance too, but core-api is not.** The API scales
+horizontally; `getUpdates`, which Telegram refuses to serve to two pollers at
+once, is elected through a renewed Redis lock, so extra replicas stand by and
+take over within the lock's TTL if the poller stops. A webhook would remove the
+election entirely, at the cost of a publicly reachable HTTPS endpoint.
+
 **Open-Meteo is polled per location, sequentially.** Locations are deduplicated
 (triggers rounded to two decimals share one call) and cached in Redis for ten
 minutes, so the current cost is low. Open-Meteo accepts batched coordinates,
