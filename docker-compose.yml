@@ -9,6 +9,12 @@ services:
       # RabbitMQ pair below) in .env before this file goes anywhere public —
       # these ports are loopback-bound, which is a second line of defence, not
       # a reason to ship a known password.
+      #
+      # These apply at initdb only, i.e. the first start on an empty volume.
+      # Changing POSTGRES_PASSWORD later leaves the role as it was; either run
+      #   docker compose exec postgres psql -U weather -d weather_notify \
+      #     -c "ALTER USER weather WITH PASSWORD 'new'"
+      # or drop the volume with `docker compose down -v` (destroys the data).
       POSTGRES_USER: ${POSTGRES_USER:-weather}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-weather}
       POSTGRES_DB: ${POSTGRES_DB:-weather_notify}
@@ -19,7 +25,15 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-weather} -d $${POSTGRES_DB:-weather_notify}"]
+      # Authenticates over TCP rather than asking whether the port answers.
+      # pg_isready calls a server healthy whose credentials no longer match any
+      # client — which is exactly what a changed password produces — and
+      # dependents then crash-loop against a dependency compose reports as fine.
+      test:
+        [
+          "CMD-SHELL",
+          "PGPASSWORD=$${POSTGRES_PASSWORD:-weather} psql -h 127.0.0.1 -U $${POSTGRES_USER:-weather} -d $${POSTGRES_DB:-weather_notify} -c 'SELECT 1' > /dev/null",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
