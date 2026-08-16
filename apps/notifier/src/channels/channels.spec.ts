@@ -130,11 +130,19 @@ describe('delivery error classification', () => {
       auth: 'a',
     });
 
-    const build = (subs: unknown[], vapid = true) => {
+    const build = (
+      subs: unknown[],
+      vapid = true,
+      deliveredTo: string[] = [],
+    ) => {
       const prisma = {
         pushSubscription: {
           findMany: jest.fn().mockResolvedValue(subs),
           delete: jest.fn().mockResolvedValue({}),
+        },
+        notification: {
+          findUnique: jest.fn().mockResolvedValue({ deliveredTo }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         },
       };
       const channel = new WebPushChannel(
@@ -188,6 +196,62 @@ describe('delivery error classification', () => {
       const err = await channel.send(event).catch((e: unknown) => e);
       expect(err).not.toBeInstanceOf(PermanentNotificationError);
       expect(prisma.pushSubscription.delete).not.toHaveBeenCalled();
+    });
+
+    // One claim covers the channel, but the channel fans out to every browser
+    // the user registered — so a retry must not re-notify the ones that already
+    // got the alert.
+    it('records each endpoint it reaches', async () => {
+      const { channel, prisma } = build([sub('s1'), sub('s2')]);
+      sendNotification.mockResolvedValue({});
+
+      await channel.send(event);
+
+      expect(prisma.notification.updateMany).toHaveBeenCalledTimes(2);
+      expect(prisma.notification.updateMany).toHaveBeenCalledWith({
+        where: { eventId: 'e1', channel: 'WEB_PUSH' },
+        data: { deliveredTo: { push: 'https://push/s1' } },
+      });
+    });
+
+    it('skips the endpoints an earlier attempt already reached', async () => {
+      const { channel } = build([sub('s1'), sub('s2')], true, [
+        'https://push/s1',
+      ]);
+      sendNotification.mockResolvedValue({});
+
+      await channel.send(event);
+
+      expect(sendNotification).toHaveBeenCalledTimes(1);
+      expect(sendNotification).toHaveBeenCalledWith(
+        expect.objectContaining({ endpoint: 'https://push/s2' }),
+        expect.any(String),
+      );
+    });
+
+    it('does nothing when every endpoint was reached already', async () => {
+      const { channel } = build([sub('s1')], true, ['https://push/s1']);
+
+      await expect(channel.send(event)).resolves.toBeUndefined();
+      expect(sendNotification).not.toHaveBeenCalled();
+    });
+
+    it('delivers to the healthy endpoints before failing for the retry', async () => {
+      const { channel, prisma } = build([sub('s1'), sub('s2')]);
+      // web-push throws a WebPushError, which is an Error carrying the status.
+      sendNotification
+        .mockRejectedValueOnce(
+          Object.assign(new Error('service unavailable'), { statusCode: 503 }),
+        )
+        .mockResolvedValueOnce({});
+
+      await expect(channel.send(event)).rejects.toThrow('service unavailable');
+      // s2 landed on this attempt and is recorded, so the retry only re-sends s1.
+      expect(prisma.notification.updateMany).toHaveBeenCalledWith({
+        where: { eventId: 'e1', channel: 'WEB_PUSH' },
+        data: { deliveredTo: { push: 'https://push/s2' } },
+      });
+      expect(sendNotification).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -127,6 +127,11 @@ model Notification {
   /// PENDING alone cannot distinguish a consumer that is sending right now
   /// from one that died mid-send, and taking over the former sends twice.
   claimedAt DateTime?
+  /// Fan-out channels deliver to several destinations under one claim; web
+  /// push is one notification per browser subscription. Recording which ones
+  /// already landed keeps a retry — triggered by any one of them failing —
+  /// from notifying the devices that received it the first time.
+  deliveredTo String[] @default([])
   user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   trigger   Trigger?    @relation(fields: [triggerId], references: [id], onDelete: SetNull)
   createdAt DateTime    @default(now())

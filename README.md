@@ -237,6 +237,11 @@ the same delivery continuing rather than a second consumer; a consumer that dies
 instead leaves the lease to expire on its own. A row still `PENDING` with an
 expired lease is therefore a real signal: a notifier died mid-send.
 
+One claim covers one channel, which is the wrong grain for **web push**: it fans
+out to every browser subscription the user registered, and one of them failing
+retries the event as a whole. `deliveredTo` records the endpoints an attempt
+actually reached, so the retry re-sends only to the devices still owed the alert.
+
 ### Transactional outbox
 
 The claim above keys on `eventId`, so it only recognises a duplicate of the *same*
