@@ -53,7 +53,12 @@ export class AuthService {
   async register(dto: RegisterDto): Promise<Tokens> {
     const existing = await this.users.findByEmail(dto.email);
     if (existing) {
-      throw new ConflictException('Unable to register with these details');
+      // Says plainly what the 409 already gives away. The vaguer wording that
+      // stood here bought nothing: a status code that only ever means "this
+      // email is taken" is the disclosure, and dressing the message up only
+      // left the user guessing at a problem they can fix. Enumeration is
+      // bounded instead by the throttler on this route.
+      throw new ConflictException('An account with this email already exists');
     }
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     const user = await this.users.create(dto.email, passwordHash);
