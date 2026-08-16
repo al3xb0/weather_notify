@@ -1,7 +1,9 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
 import {
   ConditionObservation,
+  OutboxMessage,
   TriggerStatePatch,
   WatchedTrigger,
   WatchedTriggerRepository,
@@ -60,7 +62,36 @@ export class PrismaWatchedTriggerRepository implements WatchedTriggerRepository 
     observations: ConditionObservation[],
     patch: TriggerStatePatch,
   ): Promise<void> {
+    await this.prisma.$transaction(this.writes(triggerId, observations, patch));
+  }
+
+  /** The observation write plus the staged deliveries, committed together. */
+  async commitFire(
+    triggerId: string,
+    observations: ConditionObservation[],
+    patch: TriggerStatePatch,
+    messages: OutboxMessage[],
+  ): Promise<void> {
     await this.prisma.$transaction([
+      ...this.writes(triggerId, observations, patch),
+      this.prisma.outboxEvent.createMany({
+        data: messages.map((m) => ({
+          eventId: m.eventId,
+          routingKey: m.routingKey,
+          payload: m.event as unknown as Prisma.InputJsonValue,
+        })),
+        // A retried commit re-stages rows the unique index already holds.
+        skipDuplicates: true,
+      }),
+    ]);
+  }
+
+  private writes(
+    triggerId: string,
+    observations: ConditionObservation[],
+    patch: TriggerStatePatch,
+  ) {
+    return [
       ...observations.map((o) =>
         this.prisma.triggerCondition.update({
           where: { id: o.id },
@@ -68,6 +99,6 @@ export class PrismaWatchedTriggerRepository implements WatchedTriggerRepository 
         }),
       ),
       this.prisma.trigger.update({ where: { id: triggerId }, data: patch }),
-    ]);
+    ];
   }
 }

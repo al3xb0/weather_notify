@@ -9,18 +9,16 @@ import {
   TriggerState,
   WeatherSnapshot,
 } from '@app/domain';
-import {
-  EVENT_PUBLISHER,
-  routingKeyFor,
-  TriggerFiredEvent,
-} from '@app/contracts';
-import type { EventPublisher } from '@app/contracts';
+import { routingKeyFor, TriggerFiredEvent } from '@app/contracts';
 import { WATCHED_TRIGGER_REPOSITORY } from './ports/watched-trigger.repository';
 import type {
+  OutboxMessage,
   WatchedCondition,
   WatchedTrigger,
   WatchedTriggerRepository,
 } from './ports/watched-trigger.repository';
+import { OutboxRelayService } from './outbox/outbox-relay.service';
+import type { OutboxFlusher } from './ports/outbox.repository';
 import { WEATHER_PROVIDER } from './ports/weather-provider.port';
 import type { WeatherProvider } from './ports/weather-provider.port';
 
@@ -57,8 +55,9 @@ export class WatcherService {
     private readonly triggers: WatchedTriggerRepository,
     @Inject(WEATHER_PROVIDER)
     private readonly weather: WeatherProvider,
-    @Inject(EVENT_PUBLISHER)
-    private readonly publisher: EventPublisher,
+    // Bound by class token, typed by port: the cycle only ever nudges it.
+    @Inject(OutboxRelayService)
+    private readonly outbox: OutboxFlusher,
     private readonly redis: RedisService,
   ) {}
 
@@ -190,16 +189,26 @@ export class WatcherService {
       channels: trigger.channels,
       firedAt: new Date().toISOString(),
     };
+    const messages: OutboxMessage[] = trigger.channels.map((channel) => ({
+      eventId: event.eventId,
+      routingKey: routingKeyFor(channel),
+      event,
+    }));
 
-    for (const channel of trigger.channels) {
-      await this.publisher.publish(routingKeyFor(channel), event);
-    }
-
-    await this.triggers.recordObservation(trigger.id, results, {
-      lastEvaluatedAt: evaluatedAt,
-      state: TriggerState.FIRED,
-      lastFiredAt: new Date(),
-    });
+    // Commit first: the deliveries and the state that justifies them land
+    // together, so a crash anywhere after this point loses neither. Publishing
+    // is then a best-effort push, with the relay as the guaranteed path.
+    await this.triggers.commitFire(
+      trigger.id,
+      results,
+      {
+        lastEvaluatedAt: evaluatedAt,
+        state: TriggerState.FIRED,
+        lastFiredAt: new Date(),
+      },
+      messages,
+    );
+    await this.outbox.flush();
 
     triggersFired.inc();
     this.logger.log(`Trigger "${trigger.name}" (${trigger.id}) fired`);

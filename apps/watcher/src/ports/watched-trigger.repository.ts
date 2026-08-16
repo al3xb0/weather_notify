@@ -5,6 +5,7 @@ import {
   QuietHours,
   TriggerState,
 } from '@app/domain';
+import type { TriggerFiredEvent } from '@app/contracts';
 
 /** DI token for trigger persistence — see `PrismaWatchedTriggerRepository`. */
 export const WATCHED_TRIGGER_REPOSITORY = Symbol('WATCHED_TRIGGER_REPOSITORY');
@@ -47,6 +48,13 @@ export interface TriggerStatePatch {
   lastFiredAt?: Date;
 }
 
+/** One outbound delivery, staged in the same transaction as the state change. */
+export interface OutboxMessage {
+  eventId: string;
+  routingKey: string;
+  event: TriggerFiredEvent;
+}
+
 export interface WatchedTriggerRepository {
   findActive(): Promise<WatchedTrigger[]>;
   /** Persist the per-condition observations and the state patch atomically. */
@@ -54,5 +62,17 @@ export interface WatchedTriggerRepository {
     triggerId: string,
     observations: ConditionObservation[],
     patch: TriggerStatePatch,
+  ): Promise<void>;
+  /**
+   * The same write, plus the events the firing owes the broker, in one
+   * transaction. Publishing first and committing second would re-fire the
+   * trigger under a fresh eventId after a crash in between — a duplicate the
+   * consumer cannot recognise, because its claim is keyed on that id.
+   */
+  commitFire(
+    triggerId: string,
+    observations: ConditionObservation[],
+    patch: TriggerStatePatch,
+    messages: OutboxMessage[],
   ): Promise<void>;
 }
