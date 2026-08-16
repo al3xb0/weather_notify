@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: weather-notify
+    type: file
+    disableDeletion: false
+    # The dashboard is a file in the repository, so a change to it is a diff
+    # rather than a click somebody else cannot see.
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

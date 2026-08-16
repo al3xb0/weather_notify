@@ -59,6 +59,12 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-weather}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-weather}
+    volumes:
+      # Enables rabbitmq_prometheus alongside the management plugin. Queue depth,
+      # consumer count and unacked messages are the broker's own metrics — the
+      # notifier has no business reporting them about itself — and this is the
+      # broker offering them, not a sidecar guessing.
+      - ./ops/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     ports:
       - "127.0.0.1:5672:5672"
       # Management UI is dev-only — do NOT publish it in production.
@@ -190,6 +196,58 @@ services:
       postgres:
         condition: service_healthy
 
+  # The services have exposed Prometheus metrics all along; nothing scraped
+  # them, which made the whole metric surface a design rather than something
+  # anyone could look at. These two close that gap, and the alert rules turn
+  # `watcher_outbox_pending` from a documented suggestion into a real page.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: wn_prometheus
+    restart: unless-stopped
+    mem_limit: 512m
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Local retention only. This is not a long-term metrics store, and on a
+      # small VM an unbounded TSDB is the next thing to fill the disk.
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      # Loopback only, like the rest of the infra. Reach it over an SSH tunnel
+      # rather than publishing an unauthenticated query interface.
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      core-api:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: wn_grafana
+    restart: unless-stopped
+    mem_limit: 384m
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Nothing here is meant to be reachable anonymously, and the instance sits
+      # behind loopback anyway.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3005:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+
 volumes:
   pgdata:
   backups:
+  promdata:
+  grafanadata:

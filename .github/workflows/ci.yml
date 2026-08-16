@@ -164,6 +164,39 @@ jobs:
             -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" \
             | tr -d '\r' | { read -r tables; [ "$tables" -gt 5 ] || { echo "restored schema looks empty: $tables tables"; exit 1; }; }
 
+      # Metrics that nothing scrapes are a design, not an operation. This proves
+      # every target is actually being collected and that the alert rules load
+      # — a typo in a PromQL expression is otherwise invisible until the day the
+      # rule was supposed to fire.
+      - name: Prometheus scrapes every service and loads the rules
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            up=$(curl -fsS 'http://localhost:9090/api/v1/query?query=up' | jq '[.data.result[] | select(.value[1] == "1")] | length')
+            # core-api, watcher, notifier, rabbitmq, prometheus itself.
+            [ "$up" -ge 5 ] && break
+            sleep 3
+          done
+          curl -fsS 'http://localhost:9090/api/v1/targets' | jq -e '
+            [.data.activeTargets[] | select(.health != "up")] | length == 0
+          ' || { curl -sS http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health, lastError}'; exit 1; }
+          # Rules are parsed at load, so a broken expression shows up as a group
+          # that never appears rather than as a startup failure.
+          curl -fsS 'http://localhost:9090/api/v1/rules' \
+            | jq -e '[.data.groups[].rules[] | select(.name == "OutboxBacklogGrowing")] | length == 1'
+
+      - name: Grafana provisions its datasource and dashboard
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            curl -fsS http://localhost:3005/api/health >/dev/null 2>&1 && break
+            sleep 3
+          done
+          curl -fsS -u admin:admin http://localhost:3005/api/datasources | jq -e '.[0].type == "prometheus"'
+          curl -fsS -u admin:admin http://localhost:3005/api/search | jq -e '
+            [.[] | select(.uid == "weather-notify-delivery")] | length == 1
+          '
+
       - name: Service logs
         if: failure()
         run: docker compose logs --no-color --tail 200

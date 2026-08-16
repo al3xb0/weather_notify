@@ -335,7 +335,24 @@ through every main/retry/dead bounce, and an `AsyncLocalStorage` context feeds
 pino's `mixin`. That is what makes a single delivery traceable across three
 services and several requeues.
 
-Metrics are Prometheus, on a separate unpublished port per service.
+Metrics are Prometheus, on a separate unpublished port per service — and the
+stack scrapes them itself. `prometheus` collects all three services over the
+internal network and evaluates the rules in `ops/prometheus/alerts.yml`;
+`grafana` comes up with its datasource and dashboard already provisioned from
+files in the repository, so a panel change is a diff rather than a click
+nobody else can see. Both bind to loopback: reach them over an SSH tunnel
+instead of publishing an unauthenticated query interface.
+
+| Where | Port |
+|-------|------|
+| Grafana | <http://127.0.0.1:3005> (`GRAFANA_USER`/`GRAFANA_PASSWORD`) |
+| Prometheus | <http://127.0.0.1:9090> |
+
+The rules page on what the system cannot recover from by itself — a service
+that stays unscraped, an outbox backlog that is not draining, sustained
+dead-lettering, a channel failing the majority of its deliveries, a poll cycle
+outgrowing its interval. Anything the retry ladder or the relay already absorbs
+is a graph, not a page.
 
 | Metric | Labels | Answers |
 |--------|--------|---------|
@@ -486,9 +503,10 @@ the cache absorbs it.
 joined against, and read as one paginated list. It will outgrow the tables the API
 actually queries; the natural move is a separate store with a retention policy.
 
-**Queue depth is not scraped.** Broker health — depth, consumer count, unacked
-messages — is the broker's metric, not the application's. That is `rabbitmq_exporter`
-next to the service, rather than something the notifier should report about itself.
+**Alerts have nowhere to go.** Prometheus evaluates the rules and shows them
+firing, but no Alertmanager is wired up, so nothing routes them to a person.
+That is a receiver and a webhook away, and deliberately left out here rather
+than committed with a placeholder nobody would notice was pointing nowhere.
 
 ## Deployment
 
