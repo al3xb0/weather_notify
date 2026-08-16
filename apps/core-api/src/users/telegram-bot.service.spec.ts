@@ -17,6 +17,8 @@ describe('TelegramBotService', () => {
     acquireLock: jest.Mock;
     extendLock: jest.Mock;
     releaseLock: jest.Mock;
+    getCursor: jest.Mock;
+    setCursor: jest.Mock;
   };
 
   const build = (token = 'bot-token') =>
@@ -45,6 +47,8 @@ describe('TelegramBotService', () => {
       acquireLock: jest.fn().mockResolvedValue('lock-token'),
       extendLock: jest.fn().mockResolvedValue(true),
       releaseLock: jest.fn().mockResolvedValue(true),
+      getCursor: jest.fn().mockResolvedValue(null),
+      setCursor: jest.fn().mockResolvedValue(undefined),
     };
   });
 
@@ -86,6 +90,101 @@ describe('TelegramBotService', () => {
     await tick(15_000);
     expect(http.get).toHaveBeenCalled();
     await service.onModuleDestroy();
+  });
+
+  describe('offset handover', () => {
+    const OFFSET_KEY = 'core-api:telegram:offset';
+
+    /** The offset the poller asked Telegram to start from, on call `i`. */
+    const askedFrom = (i = 0) =>
+      (http.get.mock.calls[i] as [string, { params: { offset: number } }])[1]
+        .params.offset;
+
+    it('resumes from the offset the previous leader stored', async () => {
+      // Without this the new leader starts at 0 and Telegram replays up to a
+      // day of backlog, so every pending /start gets answered a second time.
+      redis.getCursor.mockResolvedValue(500);
+      const service = build();
+
+      service.onModuleInit();
+      await tick();
+
+      expect(redis.getCursor).toHaveBeenCalledWith(OFFSET_KEY);
+      expect(askedFrom()).toBe(500);
+      await service.onModuleDestroy();
+    });
+
+    it('stores the offset it reached after handling updates', async () => {
+      http.get.mockImplementationOnce(() => updateWith(7, '/start tok'));
+      const service = build();
+
+      service.onModuleInit();
+      await tick();
+
+      expect(redis.setCursor).toHaveBeenCalledWith(OFFSET_KEY, 8);
+      await service.onModuleDestroy();
+    });
+
+    it('does not rewrite the offset while nothing arrives', async () => {
+      // The steady state is an idle long poll every 30s across every replica;
+      // rewriting an unchanged cursor each time is pure noise.
+      const service = build();
+
+      service.onModuleInit();
+      await tick(120_000);
+
+      expect(redis.setCursor).not.toHaveBeenCalled();
+      await service.onModuleDestroy();
+    });
+
+    it('keeps polling from memory when the stored offset cannot be read', async () => {
+      redis.getCursor.mockRejectedValue(new Error('redis down'));
+      const service = build();
+
+      service.onModuleInit();
+      await tick();
+
+      expect(http.get).toHaveBeenCalled();
+      expect(askedFrom()).toBe(0);
+      await service.onModuleDestroy();
+    });
+
+    it('keeps polling when the offset cannot be stored', async () => {
+      // Losing this write costs a reprocessed update, which binding already
+      // tolerates — it must not stop the poller.
+      redis.setCursor.mockRejectedValue(new Error('redis down'));
+      http.get.mockImplementationOnce(() => updateWith(7, '/start tok'));
+      const service = build();
+
+      service.onModuleInit();
+      await tick(5_000);
+
+      expect(http.get.mock.calls.length).toBeGreaterThan(1);
+      expect(askedFrom(1)).toBe(8);
+      await service.onModuleDestroy();
+    });
+
+    it('does not rewind onto updates it already handled when it retakes the lock', async () => {
+      // Reacquiring leadership re-reads the cursor, and the stored value can be
+      // behind what this process reached — the write that would have caught it
+      // up is the one that failed. Rewinding there re-answers /start messages
+      // this very process already replied to.
+      redis.getCursor.mockResolvedValue(2);
+      redis.setCursor.mockRejectedValue(new Error('redis down'));
+      // One pass reaching offset 10, then the lease is lost once and retaken.
+      // It holds from then on: a lock that could never be renewed but could
+      // always be reacquired is not a state real Redis produces.
+      redis.extendLock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      http.get.mockImplementationOnce(() => updateWith(9, '/start tok'));
+      const service = build();
+
+      service.onModuleInit();
+      await tick(5_000);
+
+      expect(redis.getCursor.mock.calls.length).toBeGreaterThan(1);
+      expect(askedFrom(1)).toBe(10);
+      await service.onModuleDestroy();
+    });
   });
 
   it('renews the lock between passes while it polls', async () => {

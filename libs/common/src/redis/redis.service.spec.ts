@@ -90,6 +90,36 @@ describe('RedisService', () => {
     });
   });
 
+  describe('cursor', () => {
+    it('returns null when nothing has been stored yet', async () => {
+      mockRedis.get.mockResolvedValue(null);
+      await expect(service.getCursor('tg:offset')).resolves.toBeNull();
+    });
+
+    it('reads back the position it stored', async () => {
+      await service.setCursor('tg:offset', 512);
+      expect(mockRedis.set).toHaveBeenCalledWith('tg:offset', '512');
+
+      mockRedis.get.mockResolvedValue('512');
+      await expect(service.getCursor('tg:offset')).resolves.toBe(512);
+    });
+
+    it('stores without an expiry, since the cursor outlives the process', async () => {
+      await service.setCursor('tg:offset', 512);
+
+      // A TTL here would silently rewind whoever takes over to the start of
+      // the backlog — the exact failure keeping it outside memory prevents.
+      // setJson next door passes 'EX' and a TTL; this must not.
+      expect(mockRedis.set).toHaveBeenCalledTimes(1);
+      expect(mockRedis.set.mock.calls[0]).toEqual(['tg:offset', '512']);
+    });
+
+    it('treats an unparseable stored value as absent', async () => {
+      mockRedis.get.mockResolvedValue('not-a-number');
+      await expect(service.getCursor('tg:offset')).resolves.toBeNull();
+    });
+  });
+
   describe('locks', () => {
     it('returns a token when the key was free', async () => {
       mockRedis.set.mockResolvedValue('OK');
