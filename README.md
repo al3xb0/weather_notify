@@ -76,8 +76,17 @@ one line: **`libs/domain` is pure, everything else may be infrastructure.**
 `libs/domain` imports nothing from Nest, Prisma, or any IO package, and an eslint
 `no-restricted-imports` rule scoped to that directory keeps it that way. That is
 the whole boundary. Ports exist only where something real crosses it — the
-upstream weather API, the broker, and the watcher's read model — not as a uniform
-tax on every service.
+upstream weather API, the broker, and the read models of the two workers — not as
+a uniform tax on every service.
+
+That last part is a rule, not a mood: **the workers reach persistence through
+ports; core-api does not.** A worker's collaborators are the things that fail
+independently, and a delivery path that cannot be exercised without a database is
+a delivery path nobody tests properly — the notifier's channels used to query
+Prisma directly, which is why its retry and claim behaviour was asserted against
+mocked query shapes rather than against behaviour. core-api stays flat because
+its controllers *are* the database, near enough: a port there would be a second
+name for the same CRUD.
 
 ### Why does `libs/database` know about the domain, and not the reverse?
 

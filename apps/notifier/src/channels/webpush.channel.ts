@@ -1,8 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import webpush from 'web-push';
-import { PrismaService } from '@app/database';
 import { Channel, TriggerFiredEvent } from '@app/contracts';
+import { DELIVERY_LOG_REPOSITORY } from '../ports/delivery-log.repository';
+import type { DeliveryLogRepository } from '../ports/delivery-log.repository';
+import { RECIPIENTS_REPOSITORY } from '../ports/recipients.repository';
+import type { RecipientsRepository } from '../ports/recipients.repository';
 import {
   NotificationChannel,
   PermanentNotificationError,
@@ -16,7 +19,10 @@ export class WebPushChannel implements NotificationChannel {
   private readonly configured: boolean;
 
   constructor(
-    private readonly prisma: PrismaService,
+    @Inject(RECIPIENTS_REPOSITORY)
+    private readonly recipients: RecipientsRepository,
+    @Inject(DELIVERY_LOG_REPOSITORY)
+    private readonly deliveries: DeliveryLogRepository,
     config: ConfigService,
   ) {
     const publicKey = config.get<string>('VAPID_PUBLIC_KEY') ?? '';
@@ -33,9 +39,7 @@ export class WebPushChannel implements NotificationChannel {
     if (!this.configured) {
       throw new PermanentNotificationError('VAPID keys are not set');
     }
-    const subs = await this.prisma.pushSubscription.findMany({
-      where: { userId: event.userId },
-    });
+    const subs = await this.recipients.pushSubscriptions(event.userId);
     if (subs.length === 0) {
       throw new PermanentNotificationError('User has no push subscriptions');
     }
@@ -43,7 +47,9 @@ export class WebPushChannel implements NotificationChannel {
     // One claim covers the channel, but this channel fans out to every browser
     // the user registered. A failure on one of them retries the whole event, so
     // without this the devices that already got the alert get it again.
-    const alreadyDelivered = await this.deliveredEndpoints(event);
+    const alreadyDelivered = new Set(
+      await this.deliveries.deliveredDestinations(this.channel, event.eventId),
+    );
     const pending = subs.filter((sub) => !alreadyDelivered.has(sub.endpoint));
     if (pending.length === 0) {
       return;
@@ -66,12 +72,16 @@ export class WebPushChannel implements NotificationChannel {
           payload,
         );
         delivered++;
-        await this.recordDelivered(event, sub.endpoint);
+        await this.deliveries.markDelivered(
+          this.channel,
+          event.eventId,
+          sub.endpoint,
+        );
       } catch (err) {
         const statusCode = (err as { statusCode?: number }).statusCode;
         if (statusCode === 404 || statusCode === 410) {
           // Subscription expired — prune it and move on.
-          await this.prisma.pushSubscription.delete({ where: { id: sub.id } });
+          await this.recipients.removePushSubscription(sub.id);
           this.logger.warn(`Pruned expired push subscription ${sub.id}`);
         } else {
           // Keep going: the remaining devices are independent, and stopping
@@ -93,28 +103,5 @@ export class WebPushChannel implements NotificationChannel {
         'All push subscriptions are invalid',
       );
     }
-  }
-
-  /** Endpoints an earlier attempt on this event already reached. */
-  private async deliveredEndpoints(
-    event: TriggerFiredEvent,
-  ): Promise<Set<string>> {
-    const row = await this.prisma.notification.findUnique({
-      where: {
-        eventId_channel: { eventId: event.eventId, channel: this.channel },
-      },
-      select: { deliveredTo: true },
-    });
-    return new Set(row?.deliveredTo ?? []);
-  }
-
-  private async recordDelivered(
-    event: TriggerFiredEvent,
-    endpoint: string,
-  ): Promise<void> {
-    await this.prisma.notification.updateMany({
-      where: { eventId: event.eventId, channel: this.channel },
-      data: { deliveredTo: { push: endpoint } },
-    });
   }
 }
