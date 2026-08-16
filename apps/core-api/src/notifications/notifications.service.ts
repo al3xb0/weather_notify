@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { RedisService } from '@app/common';
@@ -49,8 +49,14 @@ export class NotificationsService {
     return { items: items.map(toNotificationResponse), total, page, limit };
   }
 
+  /** Scoped to the owner, so a foreign id is a 404 rather than a silent no-op. */
   async remove(userId: string, id: string): Promise<{ id: string }> {
-    await this.prisma.notification.deleteMany({ where: { id, userId } });
+    const { count } = await this.prisma.notification.deleteMany({
+      where: { id, userId },
+    });
+    if (count === 0) {
+      throw new NotFoundException('Notification not found');
+    }
     return { id };
   }
 

@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { RedisService } from '@app/common';
@@ -108,6 +109,23 @@ describe('NotificationsService', () => {
       'core-api:notifications:prune',
       'token',
     );
+  });
+
+  it('reports a 404 rather than success for someone else’s notification', async () => {
+    prisma.notification.deleteMany.mockResolvedValue({ count: 0 });
+
+    await expect(service.remove('u1', 'not-theirs')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('deletes a notification the caller owns', async () => {
+    prisma.notification.deleteMany.mockResolvedValue({ count: 1 });
+
+    await expect(service.remove('u1', 'n1')).resolves.toEqual({ id: 'n1' });
+    expect(prisma.notification.deleteMany).toHaveBeenCalledWith({
+      where: { id: 'n1', userId: 'u1' },
+    });
   });
 
   it('scopes a user-initiated delete to that user', async () => {

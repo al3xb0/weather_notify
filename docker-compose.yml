@@ -5,9 +5,13 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     environment:
-      POSTGRES_USER: weather
-      POSTGRES_PASSWORD: weather
-      POSTGRES_DB: weather_notify
+      # Defaults are for local development only. Set POSTGRES_PASSWORD (and the
+      # RabbitMQ pair below) in .env before this file goes anywhere public —
+      # these ports are loopback-bound, which is a second line of defence, not
+      # a reason to ship a known password.
+      POSTGRES_USER: ${POSTGRES_USER:-weather}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-weather}
+      POSTGRES_DB: ${POSTGRES_DB:-weather_notify}
     ports:
       # Bound to loopback only — reachable for local tooling, never from the
       # public interface. Services talk to it over the internal compose network.
@@ -15,7 +19,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U weather -d weather_notify"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-weather} -d $${POSTGRES_DB:-weather_notify}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -39,8 +43,8 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     environment:
-      RABBITMQ_DEFAULT_USER: weather
-      RABBITMQ_DEFAULT_PASS: weather
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-weather}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-weather}
     ports:
       - "127.0.0.1:5672:5672"
       # Management UI is dev-only — do NOT publish it in production.
@@ -61,9 +65,9 @@ services:
     mem_limit: 512m
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather_notify}?schema=public
       REDIS_URL: redis://redis:6379
-      RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-weather}:${RABBITMQ_PASSWORD:-weather}@rabbitmq:5672
     command: sh -c "npx prisma migrate deploy && node dist/apps/core-api/main"
     ports:
       # Loopback only — exposed to the internet through the Caddy reverse proxy
@@ -94,9 +98,9 @@ services:
     mem_limit: 384m
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather_notify}?schema=public
       REDIS_URL: redis://redis:6379
-      RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-weather}:${RABBITMQ_PASSWORD:-weather}@rabbitmq:5672
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3002/ready || exit 1"]
       interval: 15s
@@ -122,9 +126,9 @@ services:
     mem_limit: 384m
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://weather:weather@postgres:5432/weather_notify?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather_notify}?schema=public
       REDIS_URL: redis://redis:6379
-      RABBITMQ_URL: amqp://weather:weather@rabbitmq:5672
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-weather}:${RABBITMQ_PASSWORD:-weather}@rabbitmq:5672
     # Long enough for the consumer to cancel, drain in-flight deliveries and
     # close the channel (see DRAIN_TIMEOUT_MS) before SIGKILL.
     stop_grace_period: 40s
