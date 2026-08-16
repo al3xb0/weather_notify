@@ -248,6 +248,14 @@ but not yet marked is simply redelivered — which lands back on the
 Relayed rows are swept after 24 hours; `watcher_outbox_pending` is the gauge to
 alert on, since a growing backlog means the relay is not keeping up.
 
+### Retention
+
+`Notification` is append-only — one row per alert per channel, payload included —
+so it grows with uptime, not with usage. A nightly sweep in core-api deletes rows
+older than `NOTIFICATION_RETENTION_DAYS` (90 by default) in bounded chunks, under
+a Redis lock so replicas do not contend over the same rows. `OutboxEvent` is kept
+for 24 hours after relay.
+
 ### Shutdown and health
 
 `/health` is liveness and answers 200 as long as the process runs — restarting it

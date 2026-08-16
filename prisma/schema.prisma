@@ -133,6 +133,9 @@ model Notification {
   @@unique([eventId, channel])
   @@index([userId, createdAt])
   @@index([triggerId])
+  /// History is append-only and unbounded otherwise; the retention sweep scans
+  /// by age alone, which the composite index above cannot serve.
+  @@index([createdAt])
 }
 
 model PushSubscription {
