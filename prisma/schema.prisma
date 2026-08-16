@@ -57,7 +57,11 @@ model User {
   passwordHash                    String
   role                            Role               @default(USER)
   telegramChatId                  String?
-  telegramLinkToken               String?            @unique
+  /// SHA-256 of the deep-link token, never the token itself: it binds a
+  /// Telegram chat to this account, so a database dump must not hand anyone a
+  /// working link. Full-entropy input, so no work factor is needed — same
+  /// reasoning as the refresh-token fingerprint.
+  telegramLinkTokenHash           String?            @unique
   telegramLinkTokenExpiresAt      DateTime?
   quietHoursStart                 String?
   quietHoursEnd                   String?
