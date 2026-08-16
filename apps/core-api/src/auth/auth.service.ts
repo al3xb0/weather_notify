@@ -231,24 +231,26 @@ export class AuthService {
     );
 
     const refreshMs = this.refreshTtlMs;
-    const row = await this.prisma.refreshToken.create({
-      data: {
-        userId,
-        tokenHash: 'pending',
-        expiresAt: new Date(Date.now() + refreshMs),
-      },
-    });
-
+    // The row id is the token's jti, so generating it here lets the token be
+    // signed before the row exists — one insert holding the real fingerprint,
+    // instead of an insert of the placeholder "pending" followed by an update.
+    // That placeholder was a hash no token could ever produce, briefly visible
+    // to anything reading the table.
+    const jti = randomUUID();
     const refreshToken = await this.jwt.signAsync(
-      { sub: userId, email, jti: row.id },
+      { sub: userId, email, jti },
       {
         secret: this.refreshSecret,
         expiresIn: Math.floor(refreshMs / 1000),
       },
     );
-    await this.prisma.refreshToken.update({
-      where: { id: row.id },
-      data: { tokenHash: hashToken(refreshToken) },
+    await this.prisma.refreshToken.create({
+      data: {
+        id: jti,
+        userId,
+        tokenHash: hashToken(refreshToken),
+        expiresAt: new Date(Date.now() + refreshMs),
+      },
     });
 
     return { accessToken, refreshToken };

@@ -177,11 +177,36 @@ describe('AuthService', () => {
         password: 'Passw0rd!',
       });
 
-      const { data } = prisma.refreshToken.update.mock.calls[0][0] as {
+      const { data } = prisma.refreshToken.create.mock.calls[0][0] as {
         data: { tokenHash: string };
       };
       expect(data.tokenHash).toBe(sha256(tokens.refreshToken));
       expect(data.tokenHash).not.toContain(tokens.refreshToken);
+    });
+
+    // The row id is the token's jti, so the token can be signed first and the
+    // row written once — no placeholder fingerprint is ever stored.
+    it('writes the row once, keyed by the jti it signed', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+        passwordHash: await bcrypt.hash('Passw0rd!', 4),
+      });
+
+      await service.login({
+        email: 'user@example.com',
+        password: 'Passw0rd!',
+      });
+
+      const { data } = prisma.refreshToken.create.mock.calls[0][0] as {
+        data: { id: string; tokenHash: string };
+      };
+      const [signed] = jwt.signAsync.mock.calls.find(
+        ([payload]: [{ jti?: string }]) => payload.jti,
+      ) as [{ jti: string }];
+      expect(data.id).toBe(signed.jti);
+      expect(data.tokenHash).not.toBe('pending');
+      expect(prisma.refreshToken.update).not.toHaveBeenCalled();
     });
 
     it('carries the current role so a promotion applies to the next token', async () => {
@@ -302,7 +327,6 @@ describe('AuthService', () => {
     it('rotates: the used row is revoked before a new pair is issued', async () => {
       jwt.verifyAsync.mockResolvedValue(payload);
       prisma.refreshToken.findUnique.mockResolvedValue(storedRow());
-      prisma.refreshToken.create.mockResolvedValue({ id: 'row-2' });
 
       const tokens = await service.refresh(presented);
 
@@ -310,7 +334,12 @@ describe('AuthService', () => {
         where: { id: 'row-1' },
         data: { revoked: true },
       });
-      expect(tokens.refreshToken).toBe('refresh.row-2');
+      // A fresh jti, so the replayed one cannot be mistaken for the new token.
+      const { data } = prisma.refreshToken.create.mock.calls[0][0] as {
+        data: { id: string };
+      };
+      expect(data.id).not.toBe('row-1');
+      expect(tokens.refreshToken).toBe(`refresh.${data.id}`);
     });
   });
 
