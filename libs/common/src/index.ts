@@ -1,5 +1,6 @@
 export * from './redis/redis.service';
 export * from './redis/redis.module';
+export * from './redis/redis-throttler.storage';
 export * from './health/health-server';
 export * from './messaging/rabbit-publisher.service';
 export * from './mail/mail.service';
