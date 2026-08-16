@@ -8,7 +8,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
-import { MailService } from '@app/common';
+import { MailService, RedisService } from '@app/common';
 import { PrismaService } from '@app/database';
 import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
@@ -42,6 +42,7 @@ describe('AuthService', () => {
   let users: { findByEmail: jest.Mock; create: jest.Mock };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let mail: { configured: boolean; send: jest.Mock };
+  let redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
 
   const buildModule = async (env = ENV): Promise<TestingModule> => {
     prisma = {
@@ -74,6 +75,10 @@ describe('AuthService', () => {
       verifyAsync: jest.fn(),
     };
     mail = { configured: true, send: jest.fn().mockResolvedValue(undefined) };
+    redis = {
+      acquireLock: jest.fn().mockResolvedValue('lock-token'),
+      releaseLock: jest.fn().mockResolvedValue(true),
+    };
 
     return Test.createTestingModule({
       providers: [
@@ -83,6 +88,7 @@ describe('AuthService', () => {
         { provide: JwtService, useValue: jwt },
         { provide: MailService, useValue: mail },
         { provide: MetricsService, useValue: { recordAuth: jest.fn() } },
+        { provide: RedisService, useValue: redis },
         {
           provide: ConfigService,
           useValue: {
@@ -455,6 +461,27 @@ describe('AuthService', () => {
         { revoked: true },
         { expiresAt: { lt: expect.any(Date) } },
       ]);
+      expect(redis.releaseLock).toHaveBeenCalledWith(
+        'core-api:refresh-tokens:prune',
+        'lock-token',
+      );
+    });
+
+    // Every replica runs the cron; one full-table delete is enough.
+    it('leaves the sweep to whichever replica holds the lock', async () => {
+      redis.acquireLock.mockResolvedValue(null);
+
+      await service.pruneStaleTokens();
+
+      expect(prisma.refreshToken.deleteMany).not.toHaveBeenCalled();
+      expect(redis.releaseLock).not.toHaveBeenCalled();
+    });
+
+    it('releases the lock even when the delete fails', async () => {
+      prisma.refreshToken.deleteMany.mockRejectedValue(new Error('db down'));
+
+      await expect(service.pruneStaleTokens()).rejects.toThrow('db down');
+      expect(redis.releaseLock).toHaveBeenCalled();
     });
   });
 });

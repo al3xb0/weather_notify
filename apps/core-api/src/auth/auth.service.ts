@@ -11,7 +11,7 @@ import { JwtService } from '@nestjs/jwt';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
-import { MailService } from '@app/common';
+import { MailService, RedisService } from '@app/common';
 import { UsersService } from '../users/users.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { RegisterDto } from './dto/register.dto';
@@ -20,6 +20,8 @@ import { RefreshPayload, Tokens } from './types';
 
 const BCRYPT_ROUNDS = 12;
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+const PRUNE_LOCK_KEY = 'core-api:refresh-tokens:prune';
+const PRUNE_LOCK_TTL_SEC = 300;
 
 @Injectable()
 export class AuthService {
@@ -36,6 +38,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly mail: MailService,
     private readonly metrics: MetricsService,
+    private readonly redis: RedisService,
     config: ConfigService,
   ) {
     this.accessSecret = config.getOrThrow<string>('JWT_ACCESS_SECRET');
@@ -205,13 +208,28 @@ export class AuthService {
 
   // Refresh tokens are single-use and short-lived; revoked/expired rows are
   // dead weight, so sweep them daily to keep the table bounded.
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { name: 'refresh-token-prune' })
   async pruneStaleTokens(): Promise<void> {
-    const { count } = await this.prisma.refreshToken.deleteMany({
-      where: { OR: [{ revoked: true }, { expiresAt: { lt: new Date() } }] },
-    });
-    if (count > 0) {
-      this.logger.log(`Pruned ${count} stale refresh token(s)`);
+    // Every replica runs this cron. The delete is idempotent, so the lock is
+    // not there for correctness — it keeps N replicas from opening N identical
+    // full-table deletes at the same instant, and matches how the notification
+    // sweep next door already behaves.
+    const token = await this.redis.acquireLock(
+      PRUNE_LOCK_KEY,
+      PRUNE_LOCK_TTL_SEC,
+    );
+    if (!token) {
+      return;
+    }
+    try {
+      const { count } = await this.prisma.refreshToken.deleteMany({
+        where: { OR: [{ revoked: true }, { expiresAt: { lt: new Date() } }] },
+      });
+      if (count > 0) {
+        this.logger.log(`Pruned ${count} stale refresh token(s)`);
+      }
+    } finally {
+      await this.redis.releaseLock(PRUNE_LOCK_KEY, token);
     }
   }
 
