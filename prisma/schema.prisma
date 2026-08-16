@@ -123,6 +123,10 @@ model Notification {
   status    NotifStatus
   payload   Json
   error     String?
+  /// When the current attempt took the row. A claim is a lease, not a flag:
+  /// PENDING alone cannot distinguish a consumer that is sending right now
+  /// from one that died mid-send, and taking over the former sends twice.
+  claimedAt DateTime?
   user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   trigger   Trigger?    @relation(fields: [triggerId], references: [id], onDelete: SetNull)
   createdAt DateTime    @default(now())

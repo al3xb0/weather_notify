@@ -30,7 +30,27 @@ const duplicatesSkipped = getCounter(
 
 const UNIQUE_VIOLATION = 'P2002';
 
+/**
+ * How long a claim is honoured before another consumer may take the row over.
+ * Longer than any channel call (each has its own timeout), short enough that a
+ * consumer killed mid-send does not park the delivery for long.
+ */
+const CLAIM_LEASE_MS = 60_000;
+
 export type DispatchOutcome = 'sent' | 'skipped';
+
+/**
+ * Raised when another consumer holds an unexpired claim on this (event,
+ * channel). Retryable on purpose: by the next attempt the holder has either
+ * settled the row — which then reads as an ordinary duplicate — or died, and
+ * its lease has expired for us to take over.
+ */
+export class DeliveryInFlightError extends Error {
+  constructor(channel: Channel) {
+    super(`Another consumer is already delivering this event on ${channel}`);
+    this.name = 'DeliveryInFlightError';
+  }
+}
 
 @Injectable()
 export class NotifierService {
@@ -76,6 +96,10 @@ export class NotifierService {
       await sender.send(event);
     } catch (err) {
       endTimer({ outcome: 'failure' });
+      // This attempt is over, so hand the claim back: the retry that follows is
+      // the same delivery continuing, not a second consumer, and must not have
+      // to outwait a lease left behind by its own previous attempt.
+      await this.releaseClaim(channel, event);
       throw err;
     }
     endTimer({ outcome: 'success' });
@@ -92,9 +116,13 @@ export class NotifierService {
     channel: Channel,
     event: TriggerFiredEvent,
   ): Promise<boolean> {
+    const now = new Date();
     try {
       await this.prisma.notification.create({
-        data: this.rowFor(channel, event, NotifStatus.PENDING),
+        data: {
+          ...this.rowFor(channel, event, NotifStatus.PENDING),
+          claimedAt: now,
+        },
       });
       return true;
     } catch (err) {
@@ -102,24 +130,60 @@ export class NotifierService {
         throw err;
       }
     }
-    // Lost the race or this is a redelivery: an earlier SENT row means done,
-    // anything else (PENDING from a crashed attempt, FAILED from a retry) is
-    // ours to take over.
+
+    // Lost the race or this is a redelivery. Take the row over only if nobody
+    // holds it: one conditional UPDATE, so two consumers arriving together
+    // cannot both come away believing they own the send.
+    const { count } = await this.prisma.notification.updateMany({
+      where: {
+        eventId: event.eventId,
+        channel,
+        status: { not: NotifStatus.SENT },
+        OR: [
+          { claimedAt: null },
+          { claimedAt: { lt: new Date(now.getTime() - CLAIM_LEASE_MS) } },
+        ],
+      },
+      data: { status: NotifStatus.PENDING, claimedAt: now, error: null },
+    });
+    if (count > 0) {
+      return true;
+    }
+
     const existing = await this.prisma.notification.findUnique({
       where: { eventId_channel: { eventId: event.eventId, channel } },
     });
-    if (existing?.status === NotifStatus.SENT) {
+    if (!existing) {
+      // Vanished between the failed create and this read (a history wipe, say);
+      // nothing holds it, and settle() upserts the row once the send lands.
+      return true;
+    }
+    if (existing.status === NotifStatus.SENT) {
       return false;
     }
-    if (existing) {
-      await this.prisma.notification.update({
-        where: { id: existing.id },
-        data: { status: NotifStatus.PENDING, error: null },
+    // Unsent, unexpired, and not ours: somebody is mid-send right now.
+    throw new DeliveryInFlightError(channel);
+  }
+
+  /**
+   * Drop our lease on a row we did not manage to deliver, leaving the status
+   * alone — the consumer decides between retry and FAILED. Best-effort: if the
+   * write fails, the lease expires on its own.
+   */
+  private async releaseClaim(
+    channel: Channel,
+    event: TriggerFiredEvent,
+  ): Promise<void> {
+    try {
+      await this.prisma.notification.updateMany({
+        where: { eventId: event.eventId, channel, status: NotifStatus.PENDING },
+        data: { claimedAt: null },
       });
+    } catch (err) {
+      this.logger.warn(
+        `Could not release the ${channel} claim: ${String(err)}`,
+      );
     }
-    // A vanished row (deleted between the failed create and this read) needs no
-    // claim of its own — settle() upserts it once the send lands.
-    return true;
   }
 
   /** Move the claimed row to its terminal state. */

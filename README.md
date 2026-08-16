@@ -223,8 +223,19 @@ two lines leaves the message on both queues, and the second copy would be
 delivered again. The unique index is the arbiter, so two consumers racing on the
 same redelivery cannot both win.
 
-`PENDING` is also a signal in its own right: a row stuck there means a notifier
-died mid-send.
+A claim is a **lease**, not a flag. `PENDING` on its own cannot tell a consumer
+that is inside the channel call right now from one that died mid-send, and
+taking the row over in the first case sends the alert twice. `claimedAt` dates
+the attempt: the take-over is one conditional `UPDATE` that matches only rows
+nobody holds — unclaimed, or claimed longer ago than the lease — and a consumer
+that matches nothing raises a retryable error rather than sending. By the next
+attempt the holder has either settled the row, which reads as an ordinary
+duplicate, or died, and its lease has expired.
+
+A failed send hands the lease straight back, because the retry that follows is
+the same delivery continuing rather than a second consumer; a consumer that dies
+instead leaves the lease to expire on its own. A row still `PENDING` with an
+expired lease is therefore a real signal: a notifier died mid-send.
 
 ### Transactional outbox
 
