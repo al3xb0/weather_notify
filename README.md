@@ -262,7 +262,10 @@ but not yet marked is simply redelivered — which lands back on the
 `(eventId, channel)` claim.
 
 Relayed rows are swept after 24 hours; `watcher_outbox_pending` is the gauge to
-alert on, since a growing backlog means the relay is not keeping up.
+alert on, since a growing backlog means the relay is not keeping up. It counts
+the staged rows directly rather than measuring the batch it just drained — a
+batch is capped at `OUTBOX_BATCH_SIZE`, so a gauge derived from it would sit at
+exactly that number however far behind the relay fell.
 
 ### Retention
 

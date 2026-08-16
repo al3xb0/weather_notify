@@ -24,6 +24,10 @@ export class PrismaOutboxRepository implements OutboxRepository {
     }));
   }
 
+  countPending(): Promise<number> {
+    return this.prisma.outboxEvent.count({ where: { publishedAt: null } });
+  }
+
   async markPublished(ids: string[]): Promise<void> {
     if (ids.length === 0) {
       return;

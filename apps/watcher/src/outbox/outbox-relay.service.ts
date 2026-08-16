@@ -82,8 +82,8 @@ export class OutboxRelayService {
 
   private async publishPending(): Promise<number> {
     const pending = await this.outbox.findPending(this.batchSize);
-    backlog.set(pending.length);
     if (pending.length === 0) {
+      backlog.set(0);
       return 0;
     }
 
@@ -105,8 +105,23 @@ export class OutboxRelayService {
 
     await this.outbox.markPublished(published);
     relayed.inc(published.length);
-    backlog.set(pending.length - published.length);
+    await this.reportBacklog();
     return published.length;
+  }
+
+  /**
+   * Count what is still staged, rather than inferring it from the batch. The
+   * batch is capped at `batchSize`, so a backlog derived from it flatlines at
+   * exactly that number the moment the relay falls behind — the one situation
+   * the gauge exists to make visible.
+   */
+  private async reportBacklog(): Promise<void> {
+    try {
+      backlog.set(await this.outbox.countPending());
+    } catch (err) {
+      // A metric is never worth failing a relay pass over.
+      this.logger.warn(`Could not measure the outbox backlog: ${String(err)}`);
+    }
   }
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { name: 'outbox-prune' })
