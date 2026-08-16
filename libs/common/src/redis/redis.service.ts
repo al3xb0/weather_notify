@@ -42,6 +42,15 @@ export class RedisService implements OnModuleDestroy {
   }
 
   /**
+   * Hand a cooldown window back. For the caller whose action never happened:
+   * charging a ten-minute wait for an attempt that failed on our side turns one
+   * outage into a much longer one for that user.
+   */
+  async clearCooldown(key: string): Promise<void> {
+    await this.client.del(key);
+  }
+
+  /**
    * Acquire a fenced lock: returns a unique token when the key was free, else
    * null. The token must be passed back to releaseLock so a slow holder cannot
    * delete a lock another instance has since acquired.
