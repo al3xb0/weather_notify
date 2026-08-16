@@ -421,6 +421,9 @@ Honest list of what would break first, and what it would take.
 
 **The watcher is a single instance.** Concurrency is prevented by a Redis lock
 rather than by design, so a second instance would idle instead of sharing load.
+The lock is renewed per location as the cycle walks them, because a cycle that
+polls locations one at a time outlives any fixed TTL once the trigger set grows,
+and an expired lock is an invitation for the next tick to run alongside it.
 Sharding by a hash of the location would let instances split the trigger set with
 no coordination, since triggers are already grouped by location.
 

@@ -112,6 +112,7 @@ describe('critical path: threshold crossed → notification delivered', () => {
 
     const redis = {
       acquireLock: jest.fn().mockResolvedValue('token'),
+      extendLock: jest.fn().mockResolvedValue(true),
       releaseLock: jest.fn().mockResolvedValue(true),
     } as never;
 
