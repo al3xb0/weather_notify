@@ -19,7 +19,11 @@ const DAY_MS = 24 * 3_600_000;
 describe('NotificationsService', () => {
   let service: NotificationsService;
   let prisma: PrismaMock;
-  let redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
+  let redis: {
+    acquireLock: jest.Mock;
+    releaseLock: jest.Mock;
+    extendLock: jest.Mock;
+  };
 
   const build = async (env: Record<string, string> = {}) => {
     prisma = {
@@ -33,6 +37,7 @@ describe('NotificationsService', () => {
     redis = {
       acquireLock: jest.fn().mockResolvedValue('token'),
       releaseLock: jest.fn().mockResolvedValue(true),
+      extendLock: jest.fn().mockResolvedValue(true),
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -98,6 +103,44 @@ describe('NotificationsService', () => {
 
     expect(prisma.notification.findMany).not.toHaveBeenCalled();
     expect(redis.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('renews the lease on every chunk, not just at the start', async () => {
+    // The loop is bounded by how much history there is, not by the lease: a
+    // first sweep over a year of rows runs far past a fixed TTL.
+    prisma.notification.findMany
+      .mockResolvedValueOnce([{ id: 'a' }])
+      .mockResolvedValueOnce([{ id: 'b' }])
+      .mockResolvedValueOnce([]);
+
+    await service.pruneExpired();
+
+    expect(redis.extendLock).toHaveBeenCalledTimes(3);
+    expect(redis.extendLock).toHaveBeenCalledWith(
+      'core-api:notifications:prune',
+      'token',
+      600,
+    );
+  });
+
+  it('stops sweeping once the lease is lost', async () => {
+    prisma.notification.findMany.mockResolvedValue([{ id: 'a' }]);
+    redis.extendLock.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    await service.pruneExpired();
+
+    // Without this the sweep keeps deleting under a lock another replica now
+    // holds, and both walk the same rows.
+    expect(prisma.notification.deleteMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops sweeping when Redis cannot be reached to renew', async () => {
+    prisma.notification.findMany.mockResolvedValue([{ id: 'a' }]);
+    redis.extendLock.mockRejectedValue(new Error('redis down'));
+
+    await expect(service.pruneExpired()).resolves.toBeUndefined();
+
+    expect(prisma.notification.deleteMany).not.toHaveBeenCalled();
   });
 
   it('releases the lock when the sweep fails', async () => {
