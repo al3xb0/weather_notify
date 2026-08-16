@@ -226,6 +226,36 @@ same redelivery cannot both win.
 `PENDING` is also a signal in its own right: a row stuck there means a notifier
 died mid-send.
 
+### Transactional outbox
+
+The claim above keys on `eventId`, so it only recognises a duplicate of the *same*
+event. Publishing first and recording the firing second would defeat it: a crash
+in between leaves the trigger `ARMED`, and the next cycle fires it again under a
+fresh `eventId` — a genuinely different event, and a second alert the consumer has
+no way to recognise.
+
+So the watcher does not publish at all. `commitFire` writes the condition
+observations, the trigger's new state and one `OutboxEvent` row per channel in a
+single transaction, and `OutboxRelayService` hands those rows to the broker
+afterwards, marking each only once the broker has accepted it. The cycle nudges
+the relay immediately so latency is unchanged; a cron pass every 30 seconds is
+what makes the delivery guaranteed rather than best-effort, covering a broker
+outage or a process that dies mid-publish. A pass stops at its first failure, so
+events reach the exchange in the order they fired, and a row that was published
+but not yet marked is simply redelivered — which lands back on the
+`(eventId, channel)` claim.
+
+Relayed rows are swept after 24 hours; `watcher_outbox_pending` is the gauge to
+alert on, since a growing backlog means the relay is not keeping up.
+
+### Retention
+
+`Notification` is append-only — one row per alert per channel, payload included —
+so it grows with uptime, not with usage. A nightly sweep in core-api deletes rows
+older than `NOTIFICATION_RETENTION_DAYS` (90 by default) in bounded chunks, under
+a Redis lock so replicas do not contend over the same rows. `OutboxEvent` is kept
+for 24 hours after relay.
+
 ### Shutdown and health
 
 `/health` is liveness and answers 200 as long as the process runs — restarting it
@@ -369,14 +399,6 @@ gate, and the smoke job.
 ## Scaling and known limits
 
 Honest list of what would break first, and what it would take.
-
-**Transactional outbox.** The watcher publishes the fired event and *then* writes
-the trigger's new state. A crash between the two re-fires the trigger on the next
-cycle with a **new** `eventId`, which the delivery-side deduplication cannot
-catch — it keys on the event, and this is a genuinely different one. The fix is
-the standard outbox: write the event and the state change in one transaction, and
-have a relay publish from the outbox table. Not built, because the window is one
-statement wide and the consequence is a duplicate alert, not a lost one.
 
 **The watcher is a single instance.** Concurrency is prevented by a Redis lock
 rather than by design, so a second instance would idle instead of sharing load.

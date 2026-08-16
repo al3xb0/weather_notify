@@ -1,9 +1,11 @@
+import type { TriggerFiredEvent } from '@app/contracts';
 import { WatcherService } from './watcher.service';
 import type { WatchedTrigger } from './ports/watched-trigger.repository';
 
 jest.mock('@app/common', () => ({
   getCounter: () => ({ inc: jest.fn() }),
   getHistogram: () => ({ startTimer: () => jest.fn() }),
+  getGauge: () => ({ set: jest.fn() }),
   // Constructor type only; never instantiated under direct unit construction.
   RedisService: class {},
 }));
@@ -20,9 +22,13 @@ import { evaluateConditions, TriggerState } from '@app/domain';
 const evalMock = evaluateConditions as jest.Mock;
 
 type Mocked = {
-  triggers: { findActive: jest.Mock; recordObservation: jest.Mock };
+  triggers: {
+    findActive: jest.Mock;
+    recordObservation: jest.Mock;
+    commitFire: jest.Mock;
+  };
   weather: { getSnapshot: jest.Mock };
-  publisher: { publish: jest.Mock };
+  outbox: { flush: jest.Mock };
   redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
 };
 
@@ -81,9 +87,10 @@ describe('WatcherService', () => {
       triggers: {
         findActive: jest.fn(),
         recordObservation: jest.fn().mockResolvedValue(undefined),
+        commitFire: jest.fn().mockResolvedValue(undefined),
       },
       weather: { getSnapshot: jest.fn().mockResolvedValue(SNAPSHOT) },
-      publisher: { publish: jest.fn().mockResolvedValue(undefined) },
+      outbox: { flush: jest.fn().mockResolvedValue(0) },
       redis: {
         acquireLock: jest.fn().mockResolvedValue('lock-token'),
         releaseLock: jest.fn().mockResolvedValue(true),
@@ -96,7 +103,7 @@ describe('WatcherService', () => {
     service = new WatcherService(
       m.triggers,
       m.weather,
-      m.publisher,
+      m.outbox,
       m.redis as never,
     );
   });
@@ -172,6 +179,7 @@ describe('WatcherService', () => {
       await service.runCycle();
     }
 
+    /** Where a non-firing cycle writes: observations and the state patch. */
     const written = () =>
       m.triggers.recordObservation.mock.calls[0] as [
         string,
@@ -179,10 +187,24 @@ describe('WatcherService', () => {
         Record<string, unknown>,
       ];
 
+    /** Where a firing cycle writes: the same, plus the staged deliveries. */
+    const committed = () =>
+      m.triggers.commitFire.mock.calls[0] as [
+        string,
+        unknown,
+        Record<string, unknown>,
+        { routingKey: string; eventId: string; event: TriggerFiredEvent }[],
+      ];
+
+    const stagedMessages = () =>
+      m.triggers.commitFire.mock.calls.flatMap(
+        (call) => call[3] as { routingKey: string }[],
+      );
+
     it('fires an ARMED trigger and transitions it to FIRED', async () => {
       await process(makeTrigger({ state: TriggerState.ARMED }));
-      expect(m.publisher.publish).toHaveBeenCalledTimes(1);
-      const [id, observations, patch] = written();
+      expect(stagedMessages()).toHaveLength(1);
+      const [id, observations, patch] = committed();
       expect(id).toBe('t1');
       expect(observations).toEqual(RESULTS);
       expect(patch.state).toBe(TriggerState.FIRED);
@@ -197,7 +219,7 @@ describe('WatcherService', () => {
           cooldownMin: 30,
         }),
       );
-      expect(m.publisher.publish).not.toHaveBeenCalled();
+      expect(m.triggers.commitFire).not.toHaveBeenCalled();
       const [, , patch] = written();
       expect(patch.state).toBeUndefined();
       expect(patch.lastFiredAt).toBeUndefined();
@@ -212,21 +234,21 @@ describe('WatcherService', () => {
           cooldownMin: 30,
         }),
       );
-      expect(m.publisher.publish).toHaveBeenCalledTimes(1);
-      expect(written()[2].state).toBe(TriggerState.FIRED);
+      expect(stagedMessages()).toHaveLength(1);
+      expect(committed()[2].state).toBe(TriggerState.FIRED);
     });
 
     it('fires a FIRED trigger that has no recorded lastFiredAt', async () => {
       await process(
         makeTrigger({ state: TriggerState.FIRED, lastFiredAt: null }),
       );
-      expect(m.publisher.publish).toHaveBeenCalledTimes(1);
+      expect(stagedMessages()).toHaveLength(1);
     });
 
     it('re-arms a FIRED trigger when the conditions clear (hysteresis)', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
       await process(makeTrigger({ state: TriggerState.FIRED }));
-      expect(m.publisher.publish).not.toHaveBeenCalled();
+      expect(m.triggers.commitFire).not.toHaveBeenCalled();
       const [id, , patch] = written();
       expect(id).toBe('t1');
       expect(patch.state).toBe(TriggerState.ARMED);
@@ -236,7 +258,7 @@ describe('WatcherService', () => {
     it('records the observation for an unmatched ARMED trigger without firing', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
       await process(makeTrigger({ state: TriggerState.ARMED }));
-      expect(m.publisher.publish).not.toHaveBeenCalled();
+      expect(m.triggers.commitFire).not.toHaveBeenCalled();
       const [, , patch] = written();
       expect(patch.state).toBeUndefined();
       expect(patch.lastEvaluatedAt).toBeInstanceOf(Date);
@@ -249,7 +271,7 @@ describe('WatcherService', () => {
           quietHours: quietWindowAroundNow(),
         }),
       );
-      expect(m.publisher.publish).not.toHaveBeenCalled();
+      expect(m.triggers.commitFire).not.toHaveBeenCalled();
       expect(written()[2].state).toBeUndefined();
       expect(m.triggers.recordObservation).toHaveBeenCalledTimes(1);
     });
@@ -261,10 +283,15 @@ describe('WatcherService', () => {
           channels: ['TELEGRAM', 'EMAIL'],
         }),
       );
-      expect(m.publisher.publish).toHaveBeenCalledTimes(2);
-      const keys = m.publisher.publish.mock.calls.map((c) => c[0]);
-      expect(keys).toEqual(['telegram.fired', 'email.fired']);
-      const event = m.publisher.publish.mock.calls[0][1];
+      const messages = committed()[3];
+      expect(messages).toHaveLength(2);
+      expect(messages.map((msg) => msg.routingKey)).toEqual([
+        'telegram.fired',
+        'email.fired',
+      ]);
+      // One event id across the fan-out: the consumer's claim is per channel.
+      expect(new Set(messages.map((msg) => msg.eventId)).size).toBe(1);
+      const event = messages[0].event;
       expect(event).toMatchObject({
         triggerId: 't1',
         conditionLogic: 'AND',

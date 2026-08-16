@@ -1,6 +1,7 @@
 import { TriggerFiredEvent } from '@app/contracts';
 import { TriggerState, WeatherSnapshot } from '@app/domain';
 import { WatcherService } from '../apps/watcher/src/watcher.service';
+import { OutboxRelayService } from '../apps/watcher/src/outbox/outbox-relay.service';
 import type {
   WatchedTrigger,
   WatchedTriggerRepository,
@@ -13,6 +14,7 @@ import {
   messageFor,
 } from './support/in-memory-notifications';
 import { InMemoryBroker } from './support/in-memory-broker';
+import { InMemoryOutbox } from './support/in-memory-outbox';
 
 const HOT: WeatherSnapshot = {
   temperature: 35,
@@ -61,12 +63,15 @@ describe('critical path: threshold crossed → notification delivered', () => {
   let consumer: RabbitConsumerService;
   let broker: InMemoryBroker;
   let watcher: WatcherService;
+  let outbox: InMemoryOutbox;
+  let relay: OutboxRelayService;
 
   beforeEach(() => {
     trigger = armedTrigger();
     published = [];
     sent = [];
     store = new InMemoryNotifications();
+    outbox = new InMemoryOutbox();
 
     repository = {
       findActive: jest.fn().mockResolvedValue([trigger]),
@@ -74,6 +79,14 @@ describe('critical path: threshold crossed → notification delivered', () => {
       // state the first one persisted.
       recordObservation: jest.fn((_id, _obs, patch) => {
         Object.assign(trigger, patch);
+        return Promise.resolve();
+      }),
+      // The real thing is one transaction; here both halves land together for
+      // the same reason — a test must not be able to observe one without the
+      // other.
+      commitFire: jest.fn((_id, _obs, patch, messages) => {
+        Object.assign(trigger, patch);
+        outbox.stage(messages);
         return Promise.resolve();
       }),
     };
@@ -96,19 +109,30 @@ describe('critical path: threshold crossed → notification delivered', () => {
     broker = new InMemoryBroker();
     broker.attachTo(consumer);
 
-    watcher = new WatcherService(
-      repository,
-      { getSnapshot: jest.fn().mockResolvedValue(HOT) },
+    const redis = {
+      acquireLock: jest.fn().mockResolvedValue('token'),
+      releaseLock: jest.fn().mockResolvedValue(true),
+    } as never;
+
+    // The real relay, so the assertions cover the path an event actually
+    // takes: staged by the commit, drained to the transport by the relay.
+    relay = new OutboxRelayService(
+      outbox,
       {
         publish: (routingKey, event) => {
           published.push({ routingKey, event });
           return Promise.resolve();
         },
       },
-      {
-        acquireLock: jest.fn().mockResolvedValue('token'),
-        releaseLock: jest.fn().mockResolvedValue(true),
-      } as never,
+      redis,
+      { get: jest.fn() } as never,
+    );
+
+    watcher = new WatcherService(
+      repository,
+      { getSnapshot: jest.fn().mockResolvedValue(HOT) },
+      relay,
+      redis,
     );
   });
 
@@ -118,6 +142,45 @@ describe('critical path: threshold crossed → notification delivered', () => {
       await broker.run(consumer, 'EMAIL', messageFor(event) as never);
     }
   }
+
+  it('stages the event with the state change, then relays it', async () => {
+    await watcher.runCycle();
+
+    expect(outbox.all).toHaveLength(1);
+    expect(outbox.pending).toHaveLength(0);
+    expect(outbox.all[0]).toMatchObject({
+      routingKey: 'email.fired',
+      eventId: published[0].event.eventId,
+    });
+  });
+
+  it('keeps the event staged when the transport refuses it', async () => {
+    const publisher = relay as unknown as {
+      publisher: { publish: jest.Mock };
+    };
+    publisher.publisher = {
+      publish: jest.fn().mockRejectedValue(new Error('broker down')),
+    };
+
+    await watcher.runCycle();
+
+    // Nothing reached the transport, and the trigger still moved to FIRED —
+    // the delivery is owed, not lost.
+    expect(published).toHaveLength(0);
+    expect(trigger.state).toBe(TriggerState.FIRED);
+    expect(outbox.pending).toHaveLength(1);
+
+    publisher.publisher = {
+      publish: jest.fn((routingKey: string, event: TriggerFiredEvent) => {
+        published.push({ routingKey, event });
+        return Promise.resolve();
+      }),
+    };
+    await relay.runRelay();
+
+    expect(published).toHaveLength(1);
+    expect(outbox.pending).toHaveLength(0);
+  });
 
   it('fires, delivers and records the notification as SENT', async () => {
     await watcher.runCycle();

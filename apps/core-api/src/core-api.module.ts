@@ -10,6 +10,7 @@ import {
   createEnvValidator,
   loggerParams,
   RedisModule,
+  RedisThrottlerStorage,
 } from '@app/common';
 import { CoreApiController } from './core-api.controller';
 import { CoreApiService } from './core-api.service';
@@ -30,7 +31,16 @@ import { MetricsModule } from './metrics/metrics.module';
     }),
     LoggerModule.forRoot(loggerParams),
     ScheduleModule.forRoot(),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
+    // Redis-backed so the limit is the same one for every replica, and so a
+    // rolling restart does not hand every client a fresh allowance.
+    ThrottlerModule.forRootAsync({
+      imports: [RedisModule],
+      inject: [RedisThrottlerStorage],
+      useFactory: (storage: RedisThrottlerStorage) => ({
+        throttlers: [{ ttl: 60_000, limit: 60 }],
+        storage,
+      }),
+    }),
     DatabaseModule,
     RedisModule,
     MetricsModule,

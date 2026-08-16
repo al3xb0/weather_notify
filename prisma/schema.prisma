@@ -133,6 +133,9 @@ model Notification {
   @@unique([eventId, channel])
   @@index([userId, createdAt])
   @@index([triggerId])
+  /// History is append-only and unbounded otherwise; the retention sweep scans
+  /// by age alone, which the composite index above cannot serve.
+  @@index([createdAt])
 }
 
 model PushSubscription {
@@ -157,6 +160,25 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+/// Events written in the same transaction as the state change that produced
+/// them, then relayed to the broker. Without it a crash between "published" and
+/// "marked as fired" re-fires the trigger with a fresh eventId, which the
+/// consumer's (eventId, channel) claim cannot recognise as a duplicate.
+model OutboxEvent {
+  id          String    @id @default(uuid())
+  eventId     String
+  routingKey  String
+  payload     Json
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+
+  /// One row per event and routing key, so a retried commit cannot enqueue the
+  /// same delivery twice.
+  @@unique([eventId, routingKey])
+  /// Drives the relay's "oldest unpublished first" scan.
+  @@index([publishedAt, createdAt])
 }
 
 model PinnedCity {

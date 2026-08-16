@@ -1,6 +1,7 @@
 import {
   collectDefaultMetrics,
   Counter,
+  Gauge,
   Histogram,
   Registry,
 } from 'prom-client';
@@ -24,6 +25,18 @@ export function getCounter(
   return (
     (metricsRegistry.getSingleMetric(name) as Counter) ??
     new Counter({ name, help, labelNames, registers: [metricsRegistry] })
+  );
+}
+
+/** Get-or-create a Gauge so re-imports never double-register. */
+export function getGauge(
+  name: string,
+  help: string,
+  labelNames: string[] = [],
+): Gauge {
+  return (
+    (metricsRegistry.getSingleMetric(name) as Gauge) ??
+    new Gauge({ name, help, labelNames, registers: [metricsRegistry] })
   );
 }
 

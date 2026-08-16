@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import cookieParser from 'cookie-parser';
@@ -10,10 +11,23 @@ import { PrismaService } from '@app/database';
 import { CoreApiModule } from './core-api.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(CoreApiModule, { bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(CoreApiModule, {
+    bufferLogs: true,
+  });
   app.useLogger(app.get(Logger));
   app.enableShutdownHooks();
   const config = app.get(ConfigService);
+
+  // Behind the reverse proxy every request arrives from the proxy's address, so
+  // without this the rate limiter tracks the whole world under one key and one
+  // noisy client locks out everybody. The hop count is explicit: trusting more
+  // hops than actually sit in front of us would let a client forge its own IP
+  // through X-Forwarded-For.
+  const trustProxy = config.get<string>('TRUST_PROXY');
+  if (trustProxy) {
+    const hops = Number(trustProxy);
+    app.set('trust proxy', Number.isFinite(hops) ? hops : trustProxy);
+  }
 
   app.useGlobalPipes(
     new ValidationPipe({

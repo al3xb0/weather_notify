@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { JwtService } from '@nestjs/jwt';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
 import { MailService } from '@app/common';
@@ -157,7 +157,7 @@ export class AuthService {
     }
     // Verify the token against the stored hash before trusting its jti, so a
     // forged jti pointing at another user's row can't drive the reuse path.
-    if (!(await bcrypt.compare(refreshToken, row.tokenHash))) {
+    if (!verifyTokenHash(refreshToken, row.tokenHash)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
     if (row.revoked) {
@@ -243,11 +243,35 @@ export class AuthService {
     );
     await this.prisma.refreshToken.update({
       where: { id: row.id },
-      data: { tokenHash: await bcrypt.hash(refreshToken, BCRYPT_ROUNDS) },
+      data: { tokenHash: hashToken(refreshToken) },
     });
 
     return { accessToken, refreshToken };
   }
+}
+
+/**
+ * Fingerprint a refresh token for storage. SHA-256, not bcrypt: the token is a
+ * signed JWT with full-entropy content, so no work factor is needed to resist
+ * guessing — and bcrypt silently ignores everything past the 72nd byte, which
+ * for a ~260-byte JWT means the signature and the jti never reach the hash.
+ */
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * Constant-time comparison against a stored fingerprint. Rows written by the
+ * previous bcrypt scheme cannot be verified and are rejected, so the sessions
+ * holding them re-authenticate once.
+ */
+function verifyTokenHash(token: string, stored: string): boolean {
+  const expected = Buffer.from(hashToken(token), 'hex');
+  const actual = Buffer.from(stored, 'hex');
+  if (actual.length !== expected.length) {
+    return false;
+  }
+  return timingSafeEqual(expected, actual);
 }
 
 /** Parse a JWT-style duration string (e.g. "15m", "7d") into milliseconds. */
