@@ -21,6 +21,10 @@ const base = {
 export const coreApiEnvSchema = z.object({
   ...base,
   REDIS_URL: required('REDIS_URL'),
+  // core-api publishes test notifications through the same broker as the
+  // watcher, so a missing URL is a boot failure — it must surface here rather
+  // than from inside the publisher's onModuleInit.
+  RABBITMQ_URL: required('RABBITMQ_URL'),
   JWT_ACCESS_SECRET: jwtSecret,
   JWT_REFRESH_SECRET: jwtSecret,
 });
