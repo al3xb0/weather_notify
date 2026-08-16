@@ -6,6 +6,29 @@ Web Push**. Built as a NestJS monorepo with an asynchronous, message-driven core
 
 > Frontend lives in a separate repository: `weather_notify_web` (Next.js).
 
+![Triggers dashboard](docs/screenshots/dashboard.png)
+
+<details>
+<summary>More screens — trigger builder, delivery history, forecast</summary>
+
+**Building a trigger.** Conditions combine with AND/OR, the city comes from a
+geocoder, and the cooldown is what stops a sustained condition from alerting
+every cycle.
+
+![Trigger builder](docs/screenshots/trigger-form.png)
+
+**Delivery history.** One row per alert per channel, with the failure reason
+kept when a channel refuses — here a push subscription the browser expired.
+
+![Notification history](docs/screenshots/notifications.png)
+
+**Forecast.** Current conditions and five days for any city, served through the
+API rather than called from the browser ([ADR 0009](docs/adr/0009-proxying-the-upstream.md)).
+
+![Weather](docs/screenshots/weather.png)
+
+</details>
+
 ## Architecture
 
 ```mermaid
