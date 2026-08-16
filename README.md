@@ -47,74 +47,32 @@ Shared code lives in `libs/`:
 
 ## Architecture decisions
 
-Decisions worth arguing about, and why they went the way they did.
+Decisions worth arguing about, with what each one **gave up**, live in
+[`docs/adr/`](docs/adr/). The load-bearing ones:
 
-### Why microservices, and why a broker?
+| # | Decision | Why |
+|---|----------|-----|
+| [0001](docs/adr/0001-microservices-and-a-broker.md) | Three services and a broker | Failure isolation, not scale — a five-minute SMTP outage must not stall the poll cycle |
+| [0002](docs/adr/0002-domain-purity-not-clean-architecture.md) | One boundary, not full Clean Architecture | `libs/domain` imports nothing, enforced by eslint; the rest may be infrastructure |
+| [0003](docs/adr/0003-persistence-depends-on-the-domain.md) | `libs/database` knows the domain | A compile-time assertion where the two vocabularies meet |
+| [0004](docs/adr/0004-cqrs-in-one-module.md) | CQRS in `triggers` only | One module with commands says the split was a decision; every module saying it says nothing |
+| [0005](docs/adr/0005-a-queue-per-retry-stage.md) | One retry queue per delay | A shared queue head-of-line blocks |
+| [0006](docs/adr/0006-idempotency-claim-as-a-lease.md) | The claim is a lease | `PENDING` alone cannot tell a live consumer from a dead one |
+| [0007](docs/adr/0007-transactional-outbox.md) | The watcher never publishes directly | A crash between publish and record fires a second, unrecognisable event |
+| [0008](docs/adr/0008-openapi-as-the-client-contract.md) | A committed OpenAPI document | A shared package's guarantee without a registry |
+| [0009](docs/adr/0009-proxying-the-upstream.md) | The browser talks to one origin | A third party's uptime should not be a visible feature's uptime |
 
-Three processes, one deployment unit, one database. It is not microservices for
-scale — the load does not need it — but for **failure isolation**. Delivery is the
-part that talks to Telegram, SMTP and push services, all of which fail in ways
-outside our control. Keeping it behind a queue means a five-minute SMTP outage
-does not stall the poll cycle, and a slow channel cannot delay an unrelated one.
+## Using this as a starting point
 
-The broker also buys ordering-free fan-out: one fired event lands on the channel
-queues the trigger names, each retried independently. Doing that in-process would
-mean either sequential delivery (one bad channel blocks the rest) or hand-rolled
-concurrency with the same retry and persistence problems, solved worse.
+Weather is the signal, not the architecture. The outbox, the idempotency lease,
+the retry ladder and the anti-spam state machine apply to anything shaped like
+*watch a signal, alert when it crosses a line* — prices, uptime, stock levels,
+sensors.
 
-**What was given up:** a single fired event now needs an idempotency claim in the
-database (below), and every developer needs RabbitMQ running locally. Both are
-paid for once and by the platform, not per feature.
-
-### Why not full Clean Architecture?
-
-The domain is genuinely small — thresholds, a cooldown, a quiet window. Wrapping
-CRUD over a handful of rows per user in entities, use-case interactors and mappers
-would be more code than the rules it protects. So the split is drawn at exactly
-one line: **`libs/domain` is pure, everything else may be infrastructure.**
-
-`libs/domain` imports nothing from Nest, Prisma, or any IO package, and an eslint
-`no-restricted-imports` rule scoped to that directory keeps it that way. That is
-the whole boundary. Ports exist only where something real crosses it — the
-upstream weather API, the broker, and the read models of the two workers — not as
-a uniform tax on every service.
-
-That last part is a rule, not a mood: **the workers reach persistence through
-ports; core-api does not.** A worker's collaborators are the things that fail
-independently, and a delivery path that cannot be exercised without a database is
-a delivery path nobody tests properly — the notifier's channels used to query
-Prisma directly, which is why its retry and claim behaviour was asserted against
-mocked query shapes rather than against behaviour. core-api stays flat because
-its controllers *are* the database, near enough: a port there would be a second
-name for the same CRUD.
-
-### Why does `libs/database` know about the domain, and not the reverse?
-
-The domain declares `Metric`, `Operator`, `ConditionLogic`, `TriggerState`,
-`Channel` and `NotifStatus`. Prisma generates its own copies from the schema.
-Rather than have the domain import the ORM's enums, `libs/database` asserts the
-two vocabularies are mutually assignable:
-
-```ts
-type AssertEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
-export const DOMAIN_ENUMS_MATCH_PRISMA: [AssertEqual<Metric, PrismaMetric>, /* … */] = [true, /* … */];
-```
-
-Adding a value on one side alone fails the build here, where the two vocabularies
-meet, instead of at runtime. The arrow points from persistence to the domain
-because that is the direction the dependency should run.
-
-### Why CQRS in one module only?
-
-`triggers` goes through `@nestjs/cqrs`; nothing else does. Triggers are the only
-place where the write side carries rules the read side does not share — an email
-verification gate, a per-user limit, a test-send cooldown — so separating them
-buys something. The rest of the API is CRUD over a handful of rows per user, and
-a bus there would be ceremony with a worse stack trace.
-
-The boundary is the point. A codebase where every module has commands and queries
-says nothing about the code; one where a single module does says the split was a
-decision.
+[**docs/using-this-as-a-template.md**](docs/using-this-as-a-template.md) is the
+short version: four files decide what the system watches, and everything else
+stays. MIT licensed — see [CONTRIBUTING.md](CONTRIBUTING.md) to work on it and
+[SECURITY.md](SECURITY.md) before deploying a fork.
 
 ## Key features
 
@@ -194,11 +152,9 @@ notifications.email.retry.3    TTL 5m    ─┘
 notifications.email.dead                   ← terminal, nothing consumes it
 ```
 
-**Why one queue per stage rather than per-message TTLs?** A RabbitMQ queue only
-expires messages from its head, in publish order. One shared retry queue holding
-mixed delays means a message with a five-minute TTL at the front holds back every
-five-second one behind it — the classic head-of-line block. Separate queues make
-each delay independent.
+One queue per stage rather than per-message TTLs, because a RabbitMQ queue only
+expires messages from its head — a shared queue head-of-line blocks
+([ADR 0005](docs/adr/0005-a-queue-per-retry-stage.md)).
 
 The attempt count travels in a header rather than being read from `x-death`,
 which is unreliable across repeated main↔retry bounces.
@@ -232,19 +188,12 @@ two lines leaves the message on both queues, and the second copy would be
 delivered again. The unique index is the arbiter, so two consumers racing on the
 same redelivery cannot both win.
 
-A claim is a **lease**, not a flag. `PENDING` on its own cannot tell a consumer
-that is inside the channel call right now from one that died mid-send, and
-taking the row over in the first case sends the alert twice. `claimedAt` dates
-the attempt: the take-over is one conditional `UPDATE` that matches only rows
-nobody holds — unclaimed, or claimed longer ago than the lease — and a consumer
-that matches nothing raises a retryable error rather than sending. By the next
-attempt the holder has either settled the row, which reads as an ordinary
-duplicate, or died, and its lease has expired.
-
-A failed send hands the lease straight back, because the retry that follows is
-the same delivery continuing rather than a second consumer; a consumer that dies
-instead leaves the lease to expire on its own. A row still `PENDING` with an
-expired lease is therefore a real signal: a notifier died mid-send.
+A claim is a **lease**, not a flag: `claimedAt` dates the attempt, so a
+take-over matches only rows nobody holds and a consumer that died mid-send is
+distinguishable from one still inside the channel call
+([ADR 0006](docs/adr/0006-idempotency-claim-as-a-lease.md)). A row still
+`PENDING` with an expired lease is therefore a real signal: a notifier died
+mid-send.
 
 One claim covers one channel, which is the wrong grain for **web push**: it fans
 out to every browser subscription the user registered, and one of them failing
@@ -253,11 +202,10 @@ actually reached, so the retry re-sends only to the devices still owed the alert
 
 ### Transactional outbox
 
-The claim above keys on `eventId`, so it only recognises a duplicate of the *same*
-event. Publishing first and recording the firing second would defeat it: a crash
-in between leaves the trigger `ARMED`, and the next cycle fires it again under a
-fresh `eventId` — a genuinely different event, and a second alert the consumer has
-no way to recognise.
+The claim above only recognises a duplicate of the *same* event, so publishing
+before recording the firing would defeat it — a crash in between fires again
+next cycle under a fresh `eventId`, which the consumer cannot recognise as a
+repeat ([ADR 0007](docs/adr/0007-transactional-outbox.md)).
 
 So the watcher does not publish at all. `commitFire` writes the condition
 observations, the trigger's new state and one `OutboxEvent` row per channel in a
