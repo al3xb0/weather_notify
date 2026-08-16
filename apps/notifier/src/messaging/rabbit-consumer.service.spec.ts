@@ -122,6 +122,52 @@ describe('RabbitConsumerService failure handling', () => {
       expect(channelWrapper.publish).toHaveBeenCalledTimes(1);
       expect(channelWrapper.ack).toHaveBeenCalledTimes(1);
     });
+
+    // `consume` takes a callback, so nothing awaits what handle() returns: a
+    // rejection escaping it is an unhandled rejection, and Node's default for
+    // one is to kill the process. Every case below reaches the database or the
+    // broker on a path that is already reacting to a failure, which is exactly
+    // when the second dependency is most likely to be down too.
+    describe('when recording the outcome itself fails', () => {
+      it('does not let a failed settle escape as an unhandled rejection', async () => {
+        notifier.dispatch.mockRejectedValue(
+          new PermanentNotificationError('account unlinked'),
+        );
+        notifier.settle.mockRejectedValue(new Error('postgres is away'));
+
+        await expect(handle(makeMsg(event))).resolves.toBeUndefined();
+      });
+
+      it('does not let a failed park escape either', async () => {
+        channelWrapper.publish.mockRejectedValue(new Error('channel closed'));
+
+        await expect(handle(makeMsg('}{ not json'))).resolves.toBeUndefined();
+      });
+
+      it('leaves the message unacked so it is redelivered', async () => {
+        notifier.dispatch.mockRejectedValue(
+          new PermanentNotificationError('account unlinked'),
+        );
+        notifier.settle.mockRejectedValue(new Error('postgres is away'));
+
+        await handle(makeMsg(event));
+
+        // Acking here would drop an alert whose outcome was never written down.
+        // Redelivery is safe: the (eventId, channel) claim absorbs duplicates.
+        expect(channelWrapper.ack).not.toHaveBeenCalled();
+      });
+
+      it('stops counting the delivery as in flight', async () => {
+        notifier.dispatch.mockRejectedValue(new Error('smtp down'));
+        channelWrapper.publish.mockRejectedValue(new Error('channel closed'));
+
+        await handle(makeMsg(event));
+
+        // A leaked counter would make every later shutdown wait out the full
+        // drain timeout for deliveries that ended long ago.
+        expect((service as unknown as { inFlight: number }).inFlight).toBe(0);
+      });
+    });
   });
 
   describe('staged retry', () => {

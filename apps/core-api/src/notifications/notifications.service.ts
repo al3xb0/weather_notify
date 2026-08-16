@@ -87,6 +87,16 @@ export class NotificationsService {
     try {
       let removed = 0;
       for (;;) {
+        // Renewed per chunk, for the same reason the watcher renews per
+        // location: the loop is bounded by how much history there is, not by
+        // any TTL, so a first sweep over a year of rows outlives the lease and
+        // hands the next replica a free lock to contend on the same rows with.
+        if (!(await this.renewLock(token))) {
+          this.logger.warn(
+            'Prune lock lost mid-sweep — stopping; the next run resumes where this left off',
+          );
+          return;
+        }
         const doomed = await this.prisma.notification.findMany({
           where: { createdAt: { lt: before } },
           select: { id: true },
@@ -106,7 +116,26 @@ export class NotificationsService {
         );
       }
     } finally {
+      // A no-op when the lease was lost above: releaseLock compares the token
+      // first, so a sweep that timed out cannot delete its successor's lock.
       await this.redis.releaseLock(PRUNE_LOCK_KEY, token);
+    }
+  }
+
+  /**
+   * Hold the lease for another TTL. A Redis outage answers "no": the sweep
+   * stops rather than keep deleting under a lock it can no longer prove.
+   */
+  private async renewLock(token: string): Promise<boolean> {
+    try {
+      return await this.redis.extendLock(
+        PRUNE_LOCK_KEY,
+        token,
+        PRUNE_LOCK_TTL_SEC,
+      );
+    } catch (err) {
+      this.logger.error(`Could not renew the prune lock: ${String(err)}`);
+      return false;
     }
   }
 }

@@ -6,5 +6,6 @@ export * from './messaging/rabbit-publisher.service';
 export * from './mail/mail.service';
 export * from './logging/logger.config';
 export * from './logging/log-context';
+export * from './logging/rejection-guard';
 export * from './metrics/metrics';
 export * from './config/env';

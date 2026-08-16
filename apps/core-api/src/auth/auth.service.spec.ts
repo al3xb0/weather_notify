@@ -54,7 +54,9 @@ describe('AuthService', () => {
         create: jest.fn().mockResolvedValue({ id: 'row-1' }),
         findUnique: jest.fn(),
         update: jest.fn().mockResolvedValue({}),
-        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        // Default: the rotation's compare-and-set wins. Tests that model losing
+        // the race override it.
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
     };
@@ -135,6 +137,24 @@ describe('AuthService', () => {
       const [, passwordHash] = users.create.mock.calls[0] as [string, string];
       expect(passwordHash).not.toContain('Passw0rd!');
       expect(await bcrypt.compare('Passw0rd!', passwordHash)).toBe(true);
+    });
+
+    it('stores only a fingerprint of the verification token, and mails the token', async () => {
+      await service.register({
+        email: 'user@example.com',
+        password: 'Passw0rd!',
+      });
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: { emailVerificationTokenHash: string } },
+      ];
+      const [{ html }] = mail.send.mock.calls[0] as [{ html: string }];
+      // The link is the only copy of the token that can verify the address;
+      // the row holds a value a dump cannot turn back into one.
+      const token = /token=([0-9a-f-]+)/.exec(html)?.[1];
+      expect(token).toBeTruthy();
+      expect(data.emailVerificationTokenHash).toBe(sha256(token!));
+      expect(data.emailVerificationTokenHash).not.toBe(token);
     });
 
     it('still issues tokens when the mailer is down — verification is a soft gate', async () => {
@@ -336,8 +356,10 @@ describe('AuthService', () => {
 
       const tokens = await service.refresh(presented);
 
-      expect(prisma.refreshToken.update).toHaveBeenNthCalledWith(1, {
-        where: { id: 'row-1' },
+      // Conditional on `revoked: false` — the check and the write are one
+      // statement, so a concurrent request cannot pass the same check.
+      expect(prisma.refreshToken.updateMany).toHaveBeenNthCalledWith(1, {
+        where: { id: 'row-1', revoked: false },
         data: { revoked: true },
       });
       // A fresh jti, so the replayed one cannot be mistaken for the new token.
@@ -346,6 +368,54 @@ describe('AuthService', () => {
       };
       expect(data.id).not.toBe('row-1');
       expect(tokens.refreshToken).toBe(`refresh.${data.id}`);
+    });
+
+    it('treats a lost rotation race as reuse rather than issuing a second pair', async () => {
+      // The row still reads `revoked: false` — the concurrent request has not
+      // committed yet — so only the conditional update can tell the two apart.
+      // Before it, both callers passed the check and both got a fresh pair,
+      // which is a replay the detection was supposed to catch.
+      jwt.verifyAsync.mockResolvedValue(payload);
+      prisma.refreshToken.findUnique.mockResolvedValue(storedRow());
+      prisma.refreshToken.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.refresh(presented)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+      expect(prisma.refreshToken.updateMany).toHaveBeenLastCalledWith({
+        where: { userId: 'u1', revoked: false },
+        data: { revoked: true },
+      });
+    });
+
+    it('lets exactly one of two concurrent refreshes through', async () => {
+      jwt.verifyAsync.mockResolvedValue(payload);
+      prisma.refreshToken.findUnique.mockResolvedValue(storedRow());
+      // The database arbitrates: the first conditional update matches the row,
+      // the second matches nothing because the first already flipped `revoked`.
+      let rowIsLive = true;
+      prisma.refreshToken.updateMany.mockImplementation(
+        (args: { where: { revoked?: boolean; id?: string } }) => {
+          if (args.where.id === undefined) {
+            return Promise.resolve({ count: 1 });
+          }
+          if (!rowIsLive) {
+            return Promise.resolve({ count: 0 });
+          }
+          rowIsLive = false;
+          return Promise.resolve({ count: 1 });
+        },
+      );
+
+      const outcomes = await Promise.allSettled([
+        service.refresh(presented),
+        service.refresh(presented),
+      ]);
+
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+      expect(outcomes.filter((o) => o.status === 'rejected')).toHaveLength(1);
+      expect(prisma.refreshToken.create).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -404,9 +474,20 @@ describe('AuthService', () => {
         where: { id: 'u1' },
         data: {
           emailVerified: true,
-          emailVerificationToken: null,
+          emailVerificationTokenHash: null,
           emailVerificationTokenExpiresAt: null,
         },
+      });
+    });
+
+    it('looks the token up by its fingerprint, never by the token itself', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.verifyEmail('good')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { emailVerificationTokenHash: sha256('good') },
       });
     });
   });

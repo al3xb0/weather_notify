@@ -49,6 +49,15 @@ const deadLetteredTotal = getCounter(
   ['channel', 'reason'],
 );
 
+// A delivery whose outcome could not be recorded at all: the settle or the
+// park itself failed. Distinct from notifier_notifications_total{status=FAILED},
+// which is a delivery that failed and was written down. Alert on any of these.
+const handlerFailures = getCounter(
+  'notifier_handler_failures_total',
+  'Deliveries left unacked because the handler could not record their outcome',
+  ['channel'],
+);
+
 type DeadReason = 'unparseable' | 'permanent' | 'attempts_exhausted';
 
 @Injectable()
@@ -155,6 +164,20 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
       const eventId = headerString(msg, EVENT_ID_HEADER) ?? unknownId(msg);
       await runWithLogContext({ eventId, channel, attempt }, () =>
         this.process(channel, msg),
+      );
+    } catch (err) {
+      // The last line of defence, and the only one this path has: `consume`
+      // takes a callback, so nothing downstream awaits this promise and an
+      // escaping rejection would take the process down instead of the message.
+      // Settling and parking both reach the database and the broker, so this is
+      // the ordinary shape of "Postgres went away mid-delivery", not a bug.
+      //
+      // The message is deliberately left unacked: it is redelivered when the
+      // channel drops, and the (eventId, channel) claim absorbs the duplicate.
+      // Acking here would drop an alert whose outcome was never recorded.
+      handlerFailures.inc({ channel });
+      this.logger.error(
+        `${channel} handler failed, leaving the message unacked for redelivery: ${String(err)}`,
       );
     } finally {
       this.inFlight--;

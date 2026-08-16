@@ -51,6 +51,26 @@ export class RedisService implements OnModuleDestroy {
   }
 
   /**
+   * Read a position previously stored with `setCursor`, or null if there is
+   * none. Kept separate from `getJson` because a cursor must not expire: it
+   * outlives the process that wrote it, which is the whole point of storing it
+   * outside one.
+   */
+  async getCursor(key: string): Promise<number | null> {
+    const raw = await this.client.get(key);
+    if (raw === null) {
+      return null;
+    }
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  /** Record a position so whoever takes over resumes from it. */
+  async setCursor(key: string, value: number): Promise<void> {
+    await this.client.set(key, String(value));
+  }
+
+  /**
    * Acquire a fenced lock: returns a unique token when the key was free, else
    * null. The token must be passed back to releaseLock so a slow holder cannot
    * delete a lock another instance has since acquired.

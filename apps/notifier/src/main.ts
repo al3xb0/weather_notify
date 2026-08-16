@@ -1,10 +1,13 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
-import { startHealthServer } from '@app/common';
+import { installRejectionGuard, startHealthServer } from '@app/common';
 import { NotifierModule } from './notifier.module';
 import { RabbitConsumerService } from './messaging/rabbit-consumer.service';
 
 async function bootstrap() {
+  // Before anything else: the consumer hands its handler to `consume` as a
+  // callback, so nothing in the framework is left to await it.
+  installRejectionGuard('Notifier');
   // Worker process: consumes RabbitMQ, no HTTP server.
   const app = await NestFactory.createApplicationContext(NotifierModule, {
     bufferLogs: true,

@@ -67,7 +67,11 @@ model User {
   quietHoursEnd                   String?
   timezone                        String?
   emailVerified                   Boolean            @default(false)
-  emailVerificationToken          String?            @unique
+  /// SHA-256 of the verification token, never the token itself — same
+  /// reasoning as [telegramLinkTokenHash] and the refresh-token fingerprint.
+  /// It clears the soft gate on arming alerts, so a database dump must not
+  /// hand anyone a working confirmation for an address they do not own.
+  emailVerificationTokenHash      String?            @unique
   emailVerificationTokenExpiresAt DateTime?
   triggers                        Trigger[]
   pushSubs                        PushSubscription[]

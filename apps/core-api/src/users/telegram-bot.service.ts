@@ -27,6 +27,10 @@ const LONG_POLL_SEC = 30;
 // mistaken for a dead one; it is renewed after every pass.
 const POLL_LOCK_KEY = 'core-api:telegram:poller';
 const POLL_LOCK_TTL_SEC = 90;
+// The offset outlives the process holding it, so it lives next to the lock
+// rather than in memory: leadership moving to another replica must not send
+// the new poller back to the start of Telegram's backlog.
+const POLL_OFFSET_KEY = 'core-api:telegram:offset';
 // How long a follower waits before checking whether the leader is gone.
 const LEADER_RETRY_MS = 15_000;
 // A long poll normally blocks for LONG_POLL_SEC, but nothing guarantees it:
@@ -45,6 +49,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramBotService.name);
   private readonly token: string;
   private offset = 0;
+  // What Redis already knows. Starts equal to `offset` so an idle poller — the
+  // steady state, one pass every LONG_POLL_SEC — writes nothing at all.
+  private persistedOffset = 0;
   private running = false;
   // Aborts the in-flight long poll on shutdown; without it the process would
   // sit on an open request for up to LONG_POLL_SEC after being told to stop.
@@ -93,6 +100,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       }
       this.logger.log('Acquired the Telegram poll lock — polling for updates');
       try {
+        await this.loadOffset();
         await this.pollWhileLeader(lock);
       } finally {
         await this.redis.releaseLock(POLL_LOCK_KEY, lock).catch(() => false);
@@ -116,6 +124,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
             this.offset = update.update_id + 1;
           }
         }
+        await this.persistOffset();
       } catch (err) {
         if (!this.running) {
           return;
@@ -134,6 +143,46 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       if (elapsed < MIN_PASS_MS) {
         await this.delay(MIN_PASS_MS - elapsed);
       }
+    }
+  }
+
+  /**
+   * Resume where the previous leader stopped. Telegram keeps undelivered
+   * updates for 24 hours and serves them from the offset asked for, so a poller
+   * starting at 0 replays a day of `/start` messages and answers every one of
+   * them again. Failing to read it is not fatal — the offset in memory is the
+   * fallback, and re-processing is bounded by that same window.
+   */
+  private async loadOffset(): Promise<void> {
+    try {
+      const stored = await this.redis.getCursor(POLL_OFFSET_KEY);
+      if (stored !== null && stored > this.offset) {
+        this.offset = stored;
+        this.persistedOffset = stored;
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Could not read the stored Telegram offset, resuming from ${this.offset}: ${String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Record the offset after a pass that moved it. Best-effort on purpose: the
+   * cost of losing this write is handling an update twice, and binding is
+   * already idempotent — the link token is consumed by the first attempt.
+   */
+  private async persistOffset(): Promise<void> {
+    if (this.offset === this.persistedOffset) {
+      return;
+    }
+    try {
+      await this.redis.setCursor(POLL_OFFSET_KEY, this.offset);
+      this.persistedOffset = this.offset;
+    } catch (err) {
+      this.logger.warn(
+        `Could not store the Telegram offset ${this.offset}: ${String(err)}`,
+      );
     }
   }
 

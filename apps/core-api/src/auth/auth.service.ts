@@ -74,7 +74,7 @@ export class AuthService {
   /** Confirm an email-verification token (idempotent for unknown tokens). */
   async verifyEmail(token: string): Promise<{ verified: boolean }> {
     const user = await this.prisma.user.findUnique({
-      where: { emailVerificationToken: token },
+      where: { emailVerificationTokenHash: hashToken(token) },
     });
     if (
       !user ||
@@ -87,7 +87,7 @@ export class AuthService {
       where: { id: user.id },
       data: {
         emailVerified: true,
-        emailVerificationToken: null,
+        emailVerificationTokenHash: null,
         emailVerificationTokenExpiresAt: null,
       },
     });
@@ -111,11 +111,13 @@ export class AuthService {
     userId: string,
     email: string,
   ): Promise<void> {
+    // The link carries the token; the row keeps only its fingerprint, so the
+    // one copy that can verify an address lives in the user's inbox.
     const token = randomUUID();
     await this.prisma.user.update({
       where: { id: userId },
       data: {
-        emailVerificationToken: token,
+        emailVerificationTokenHash: hashToken(token),
         emailVerificationTokenExpiresAt: new Date(Date.now() + VERIFY_TTL_MS),
       },
     });
@@ -169,24 +171,40 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
     if (row.revoked) {
-      // Reuse detection: an already-rotated token is being replayed, which
-      // means it likely leaked. Revoke the user's whole token family so both
-      // the attacker and the legitimate user must re-authenticate.
-      await this.prisma.refreshToken.updateMany({
-        where: { userId: row.userId, revoked: false },
-        data: { revoked: true },
-      });
-      this.logger.warn(`Refresh token reuse detected for user ${row.userId}`);
+      await this.revokeFamily(row.userId);
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    // Rotation: revoke the used token before issuing a new pair.
-    await this.prisma.refreshToken.update({
-      where: { id: row.id },
+    // Rotation is the compare-and-set itself, not a read followed by a write.
+    // Reading `revoked` above and trusting it here would let two requests
+    // carrying the same token both pass the check and both walk away with a
+    // fresh pair — the exact replay this is meant to catch, just narrow enough
+    // to need concurrency. Losing this update means another request already
+    // spent the token, so it is a reuse whoever got here second.
+    const { count } = await this.prisma.refreshToken.updateMany({
+      where: { id: row.id, revoked: false },
       data: { revoked: true },
     });
+    if (count === 0) {
+      await this.revokeFamily(row.userId);
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
     this.metrics.recordAuth('refresh');
     return this.issueTokens(payload.sub, payload.email ?? '');
+  }
+
+  /**
+   * Reuse detection: an already-rotated token is being replayed, which means it
+   * likely leaked. Revoke every live token the user holds so both the attacker
+   * and the legitimate user must re-authenticate.
+   */
+  private async revokeFamily(userId: string): Promise<void> {
+    await this.prisma.refreshToken.updateMany({
+      where: { userId, revoked: false },
+      data: { revoked: true },
+    });
+    this.logger.warn(`Refresh token reuse detected for user ${userId}`);
   }
 
   async logout(refreshToken: string): Promise<{ success: boolean }> {

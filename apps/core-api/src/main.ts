@@ -6,11 +6,18 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import { RedisService, startHealthServer } from '@app/common';
+import {
+  installRejectionGuard,
+  RedisService,
+  startHealthServer,
+} from '@app/common';
 import { PrismaService } from '@app/database';
 import { CoreApiModule } from './core-api.module';
 
 async function bootstrap() {
+  // Express catches what happens inside a request; the crons and the Telegram
+  // poller run outside one, and those are what this covers.
+  installRejectionGuard('CoreApi');
   const app = await NestFactory.create<NestExpressApplication>(CoreApiModule, {
     bufferLogs: true,
   });
