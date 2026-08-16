@@ -26,8 +26,12 @@ export default defineConfig(
   {
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
-      '@typescript-eslint/no-floating-promises': 'warn',
-      '@typescript-eslint/no-unsafe-argument': 'warn',
+      // Errors, not warnings: `lint` runs with --max-warnings 0, so a warning
+      // fails the build anyway and the softer level only misreports intent.
+      // A dropped promise in a consumer or a cron is how a worker dies without
+      // a stack trace — this rule is the one that catches it before review.
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-unsafe-argument': 'error',
       'prettier/prettier': ['error', { endOfLine: 'auto' }],
     },
   },
