@@ -284,6 +284,37 @@ older than `NOTIFICATION_RETENTION_DAYS` (90 by default) in bounded chunks, unde
 a Redis lock so replicas do not contend over the same rows. `OutboxEvent` is kept
 for 24 hours after relay.
 
+### Backups
+
+Everything above protects a *message*. None of it survives losing the volume,
+which on a single-VM deployment is the failure that actually ends the service —
+so the `db-backup` sidecar dumps Postgres on a schedule and ships with the
+stack rather than living in a host crontab nobody reprovisions.
+
+Each run writes a custom-format dump, **verifies it is a readable archive**
+(`pg_restore --list`) before keeping it, and prunes copies older than
+`BACKUP_RETENTION_DAYS`. A dump is written to `.part` and renamed only when it
+completes, so a crash mid-dump cannot leave a truncated file that looks like a
+finished backup. A failed run logs and waits for the next window instead of
+exiting, because a container that stops is a backup that stops.
+
+Local dumps survive a dropped table, not a lost VM. Setting `BACKUP_S3_BUCKET`
+plus AWS credentials mirrors each one off-site — any S3-compatible store works
+(`AWS_ENDPOINT_URL` for B2, R2 or MinIO). A failed upload keeps the local copy.
+
+**To restore** — the procedure lives next to the thing that writes the files, so
+the two cannot drift:
+
+```bash
+docker compose stop core-api watcher notifier      # nobody holds a connection
+docker compose run --rm -T db-backup /scripts/restore.sh /backups/<file>.dump
+docker compose start core-api watcher notifier
+```
+
+`RESTORE_TARGET_DB` points the restore at a scratch database instead of the
+live one, which is how this gets rehearsed rather than first attempted on the
+day it matters. A backup nobody has restored is a hypothesis.
+
 ### Shutdown and health
 
 `/health` is liveness and answers 200 as long as the process runs — restarting it

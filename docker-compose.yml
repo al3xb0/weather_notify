@@ -157,5 +157,39 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # Everything else in this stack is built so a *message* survives a crash. None
+  # of it survives losing the volume, which on a single VM is the failure that
+  # ends the service — so the schedule ships with the stack rather than living
+  # in a host crontab nobody reprovisions.
+  db-backup:
+    build:
+      context: ./scripts/backup
+    container_name: wn_db_backup
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      PGHOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-weather}
+      POSTGRES_DB: ${POSTGRES_DB:-weather_notify}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-weather}
+      BACKUP_INTERVAL_SEC: ${BACKUP_INTERVAL_SEC:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      # Unset means local-only, which survives a dropped table but not a lost
+      # VM. Set it, with the credentials below, for that to be a real DR plan.
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      # S3-compatible object storage (Backblaze B2, Cloudflare R2, MinIO).
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
+    volumes:
+      # A named volume rather than a bind mount so the dumps survive
+      # `docker compose down` — the moment they are most likely to be wanted.
+      - backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  backups:

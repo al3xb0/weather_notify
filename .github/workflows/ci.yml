@@ -143,6 +143,27 @@ jobs:
             -d '{"name":"Heat","city":"Berlin","latitude":52.52,"longitude":13.405,"channels":["EMAIL"],"conditions":[{"metric":"TEMPERATURE","operator":"GT","threshold":30}]}')
           [ "$status" = "403" ] || { echo "expected 403 for an unverified user, got $status"; exit 1; }
 
+      # A backup nobody has restored is a hypothesis, and one nobody has taken
+      # is not even that. This runs the real dump against the real database and
+      # then restores it into a scratch schema, so both halves of the recovery
+      # path are exercised rather than assumed.
+      - name: Backups can be taken and restored
+        run: |
+          set -euo pipefail
+          docker compose exec -T db-backup /scripts/backup.sh once
+          dump=$(docker compose exec -T db-backup sh -c 'ls -1 /backups/*.dump | head -1' | tr -d '\r')
+          [ -n "$dump" ] || { echo "no dump was written"; exit 1; }
+
+          docker compose exec -T postgres \
+            psql -U weather -d postgres -c 'CREATE DATABASE restore_drill'
+          docker compose exec -T -e RESTORE_TARGET_DB=restore_drill db-backup \
+            /scripts/restore.sh "$dump"
+          # The restored copy has to contain the schema, not merely load without
+          # error — an empty database restores cleanly too.
+          docker compose exec -T postgres psql -U weather -d restore_drill \
+            -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" \
+            | tr -d '\r' | { read -r tables; [ "$tables" -gt 5 ] || { echo "restored schema looks empty: $tables tables"; exit 1; }; }
+
       - name: Service logs
         if: failure()
         run: docker compose logs --no-color --tail 200
