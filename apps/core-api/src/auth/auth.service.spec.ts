@@ -8,7 +8,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
-import { MailService } from '@app/common';
+import { MailService, RedisService } from '@app/common';
 import { PrismaService } from '@app/database';
 import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
@@ -42,6 +42,7 @@ describe('AuthService', () => {
   let users: { findByEmail: jest.Mock; create: jest.Mock };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let mail: { configured: boolean; send: jest.Mock };
+  let redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
 
   const buildModule = async (env = ENV): Promise<TestingModule> => {
     prisma = {
@@ -74,6 +75,10 @@ describe('AuthService', () => {
       verifyAsync: jest.fn(),
     };
     mail = { configured: true, send: jest.fn().mockResolvedValue(undefined) };
+    redis = {
+      acquireLock: jest.fn().mockResolvedValue('lock-token'),
+      releaseLock: jest.fn().mockResolvedValue(true),
+    };
 
     return Test.createTestingModule({
       providers: [
@@ -83,6 +88,7 @@ describe('AuthService', () => {
         { provide: JwtService, useValue: jwt },
         { provide: MailService, useValue: mail },
         { provide: MetricsService, useValue: { recordAuth: jest.fn() } },
+        { provide: RedisService, useValue: redis },
         {
           provide: ConfigService,
           useValue: {
@@ -177,11 +183,36 @@ describe('AuthService', () => {
         password: 'Passw0rd!',
       });
 
-      const { data } = prisma.refreshToken.update.mock.calls[0][0] as {
+      const { data } = prisma.refreshToken.create.mock.calls[0][0] as {
         data: { tokenHash: string };
       };
       expect(data.tokenHash).toBe(sha256(tokens.refreshToken));
       expect(data.tokenHash).not.toContain(tokens.refreshToken);
+    });
+
+    // The row id is the token's jti, so the token can be signed first and the
+    // row written once — no placeholder fingerprint is ever stored.
+    it('writes the row once, keyed by the jti it signed', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+        passwordHash: await bcrypt.hash('Passw0rd!', 4),
+      });
+
+      await service.login({
+        email: 'user@example.com',
+        password: 'Passw0rd!',
+      });
+
+      const { data } = prisma.refreshToken.create.mock.calls[0][0] as {
+        data: { id: string; tokenHash: string };
+      };
+      const [signed] = jwt.signAsync.mock.calls.find(
+        ([payload]: [{ jti?: string }]) => payload.jti,
+      ) as [{ jti: string }];
+      expect(data.id).toBe(signed.jti);
+      expect(data.tokenHash).not.toBe('pending');
+      expect(prisma.refreshToken.update).not.toHaveBeenCalled();
     });
 
     it('carries the current role so a promotion applies to the next token', async () => {
@@ -302,7 +333,6 @@ describe('AuthService', () => {
     it('rotates: the used row is revoked before a new pair is issued', async () => {
       jwt.verifyAsync.mockResolvedValue(payload);
       prisma.refreshToken.findUnique.mockResolvedValue(storedRow());
-      prisma.refreshToken.create.mockResolvedValue({ id: 'row-2' });
 
       const tokens = await service.refresh(presented);
 
@@ -310,7 +340,12 @@ describe('AuthService', () => {
         where: { id: 'row-1' },
         data: { revoked: true },
       });
-      expect(tokens.refreshToken).toBe('refresh.row-2');
+      // A fresh jti, so the replayed one cannot be mistaken for the new token.
+      const { data } = prisma.refreshToken.create.mock.calls[0][0] as {
+        data: { id: string };
+      };
+      expect(data.id).not.toBe('row-1');
+      expect(tokens.refreshToken).toBe(`refresh.${data.id}`);
     });
   });
 
@@ -426,6 +461,27 @@ describe('AuthService', () => {
         { revoked: true },
         { expiresAt: { lt: expect.any(Date) } },
       ]);
+      expect(redis.releaseLock).toHaveBeenCalledWith(
+        'core-api:refresh-tokens:prune',
+        'lock-token',
+      );
+    });
+
+    // Every replica runs the cron; one full-table delete is enough.
+    it('leaves the sweep to whichever replica holds the lock', async () => {
+      redis.acquireLock.mockResolvedValue(null);
+
+      await service.pruneStaleTokens();
+
+      expect(prisma.refreshToken.deleteMany).not.toHaveBeenCalled();
+      expect(redis.releaseLock).not.toHaveBeenCalled();
+    });
+
+    it('releases the lock even when the delete fails', async () => {
+      prisma.refreshToken.deleteMany.mockRejectedValue(new Error('db down'));
+
+      await expect(service.pruneStaleTokens()).rejects.toThrow('db down');
+      expect(redis.releaseLock).toHaveBeenCalled();
     });
   });
 });

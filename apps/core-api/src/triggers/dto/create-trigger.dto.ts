@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayNotEmpty,
+  ArrayUnique,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -58,8 +59,12 @@ export class CreateTriggerDto {
   @IsEnum(ConditionLogic)
   conditionLogic?: ConditionLogic;
 
+  // Unique because a channel repeated here is delivered to once anyway — the
+  // outbox stages one row per (event, routing key) — so the copies only ever
+  // misrepresent the trigger back to the user who saved it.
   @IsArray()
   @ArrayNotEmpty()
+  @ArrayUnique()
   @ArrayMaxSize(API_LIMITS.maxChannelsPerTrigger)
   @IsEnum(Channel, { each: true })
   channels!: Channel[];

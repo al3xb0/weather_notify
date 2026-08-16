@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
+import { RedisService } from '@app/common';
 import { UsersService } from './users.service';
 
 interface TelegramUpdate {
@@ -21,10 +22,23 @@ interface GetUpdatesResponse {
 
 const LONG_POLL_SEC = 30;
 
+// Leader election across core-api replicas. The TTL outlives one long poll and
+// its request timeout, so a leader that is merely waiting on Telegram is never
+// mistaken for a dead one; it is renewed after every pass.
+const POLL_LOCK_KEY = 'core-api:telegram:poller';
+const POLL_LOCK_TTL_SEC = 90;
+// How long a follower waits before checking whether the leader is gone.
+const LEADER_RETRY_MS = 15_000;
+// A long poll normally blocks for LONG_POLL_SEC, but nothing guarantees it:
+// `ok: false` and an instantly drained backlog both return at once, and an
+// unpaced loop would then spin on the API at full speed.
+const MIN_PASS_MS = 1_000;
+
 /**
  * Long-polls the Telegram Bot API and binds chats opened via the deep-link
- * `t.me/<bot>?start=<token>`. Runs only inside core-api so a single consumer
- * owns getUpdates (Telegram rejects concurrent pollers).
+ * `t.me/<bot>?start=<token>`. Telegram rejects concurrent getUpdates calls for
+ * the same bot with a 409, so exactly one replica may poll: the instance
+ * holding the Redis lock does, the rest stand by and take over when it stops.
  */
 @Injectable()
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
@@ -32,10 +46,15 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   private readonly token: string;
   private offset = 0;
   private running = false;
+  // Aborts the in-flight long poll on shutdown; without it the process would
+  // sit on an open request for up to LONG_POLL_SEC after being told to stop.
+  private aborter = new AbortController();
+  private lifecycle: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly users: UsersService,
     private readonly http: HttpService,
+    private readonly redis: RedisService,
     config: ConfigService,
   ) {
     this.token = config.get<string>('TELEGRAM_BOT_TOKEN') ?? '';
@@ -47,15 +66,43 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.running = true;
-    void this.loop();
+    this.lifecycle = this.run();
   }
 
-  onModuleDestroy(): void {
+  /** Stop polling, cancel the open request and hand the lock back promptly. */
+  async onModuleDestroy(): Promise<void> {
     this.running = false;
+    this.aborter.abort();
+    await this.lifecycle;
   }
 
-  private async loop(): Promise<void> {
+  /** Stand by until this replica can hold the lock, then poll while it does. */
+  private async run(): Promise<void> {
     while (this.running) {
+      const lock = await this.redis
+        .acquireLock(POLL_LOCK_KEY, POLL_LOCK_TTL_SEC)
+        .catch((err: unknown) => {
+          this.logger.error(
+            `Could not reach Redis for the poll lock: ${String(err)}`,
+          );
+          return null;
+        });
+      if (!lock) {
+        await this.delay(LEADER_RETRY_MS);
+        continue;
+      }
+      this.logger.log('Acquired the Telegram poll lock — polling for updates');
+      try {
+        await this.pollWhileLeader(lock);
+      } finally {
+        await this.redis.releaseLock(POLL_LOCK_KEY, lock).catch(() => false);
+      }
+    }
+  }
+
+  private async pollWhileLeader(lock: string): Promise<void> {
+    while (this.running) {
+      const startedAt = Date.now();
       try {
         for (const update of await this.getUpdates()) {
           try {
@@ -70,10 +117,30 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
           }
         }
       } catch (err) {
+        if (!this.running) {
+          return;
+        }
         this.logger.error(`getUpdates failed: ${(err as Error).message}`);
         await this.delay(5000);
       }
+      // Renewed between passes rather than on a timer: losing the lock means
+      // another replica already believes it is the poller, and two pollers is
+      // the one state Telegram refuses to serve.
+      if (!(await this.extendLease(lock))) {
+        this.logger.warn('Lost the Telegram poll lock — standing by');
+        return;
+      }
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_PASS_MS) {
+        await this.delay(MIN_PASS_MS - elapsed);
+      }
     }
+  }
+
+  private extendLease(lock: string): Promise<boolean> {
+    return this.redis
+      .extendLock(POLL_LOCK_KEY, lock, POLL_LOCK_TTL_SEC)
+      .catch(() => false);
   }
 
   private async getUpdates(): Promise<TelegramUpdate[]> {
@@ -81,6 +148,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       this.http.get<GetUpdatesResponse>(`${this.apiBase()}/getUpdates`, {
         params: { timeout: LONG_POLL_SEC, offset: this.offset },
         timeout: (LONG_POLL_SEC + 5) * 1000,
+        signal: this.aborter.signal,
       }),
     );
     return data.ok ? data.result : [];
@@ -124,7 +192,17 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     return `https://api.telegram.org/bot${this.token}`;
   }
 
+  /** Sleep that gives up as soon as shutdown starts. */
   private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const timer = setTimeout(finish, ms);
+      const signal = this.aborter.signal;
+      function finish() {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', finish);
+        resolve();
+      }
+      signal.addEventListener('abort', finish, { once: true });
+    });
   }
 }

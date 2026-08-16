@@ -1,8 +1,12 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { createHash } from 'node:crypto';
 import { PrismaService } from '@app/database';
 import { UsersService } from './users.service';
 import { CreatePushSubscriptionDto } from './dto/push-subscription.dto';
+
+const sha256 = (value: string) =>
+  createHash('sha256').update(value).digest('hex');
 
 type PrismaMock = {
   user: {
@@ -70,11 +74,15 @@ describe('UsersService', () => {
   });
 
   describe('createTelegramLink', () => {
-    it('persists the token with a future expiry', async () => {
+    it('persists a fingerprint of the token, never the token itself', async () => {
       const { url, token } = await service.createTelegramLink('u1', 'wxbot');
       expect(url).toBe(`https://t.me/wxbot?start=${token}`);
+
       const data = prisma.user.update.mock.calls[0][0].data;
-      expect(data.telegramLinkToken).toBe(token);
+      // The link binds a chat to this account, so a dump of the table must not
+      // hand anyone a working one.
+      expect(data.telegramLinkTokenHash).toBe(sha256(token));
+      expect(data.telegramLinkTokenHash).not.toContain(token);
       expect(data.telegramLinkTokenExpiresAt.getTime()).toBeGreaterThan(
         Date.now(),
       );
@@ -88,7 +96,7 @@ describe('UsersService', () => {
         where: { id: 'u1' },
         data: {
           telegramChatId: null,
-          telegramLinkToken: null,
+          telegramLinkTokenHash: null,
           telegramLinkTokenExpiresAt: null,
         },
       });
@@ -108,6 +116,12 @@ describe('UsersService', () => {
         telegramLinkTokenExpiresAt: new Date(Date.now() + 60_000),
       });
       await expect(service.bindTelegram('tok', '99')).resolves.toBe(true);
+
+      // Looked up by fingerprint: the bot presents the token, the table holds
+      // only its hash.
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { telegramLinkTokenHash: sha256('tok') },
+      });
       expect(prisma.user.update.mock.calls[0][0].data.telegramChatId).toBe(
         '99',
       );
@@ -121,7 +135,7 @@ describe('UsersService', () => {
       await expect(service.bindTelegram('tok', '99')).resolves.toBe(false);
       const data = prisma.user.update.mock.calls[0][0].data;
       expect(data.telegramChatId).toBeUndefined();
-      expect(data.telegramLinkToken).toBeNull();
+      expect(data.telegramLinkTokenHash).toBeNull();
     });
   });
 

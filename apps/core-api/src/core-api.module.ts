@@ -13,7 +13,6 @@ import {
   RedisThrottlerStorage,
 } from '@app/common';
 import { CoreApiController } from './core-api.controller';
-import { CoreApiService } from './core-api.service';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { TriggersModule } from './triggers/triggers.module';
@@ -53,6 +52,6 @@ import { MetricsModule } from './metrics/metrics.module';
     AdminModule,
   ],
   controllers: [CoreApiController],
-  providers: [CoreApiService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class CoreApiModule {}

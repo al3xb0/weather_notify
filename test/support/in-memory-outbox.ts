@@ -44,6 +44,10 @@ export class InMemoryOutbox implements OutboxRepository {
     );
   }
 
+  countPending(): Promise<number> {
+    return Promise.resolve(this.pending.length);
+  }
+
   markPublished(ids: string[]): Promise<void> {
     for (const row of this.rows) {
       if (ids.includes(row.id)) {

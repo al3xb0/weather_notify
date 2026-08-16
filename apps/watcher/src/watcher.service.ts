@@ -23,8 +23,12 @@ import { WEATHER_PROVIDER } from './ports/weather-provider.port';
 import type { WeatherProvider } from './ports/weather-provider.port';
 
 const CYCLE_LOCK_KEY = 'watcher:cycle:lock';
-// Auto-expires if a cycle crashes without releasing; longer than any sane run.
-const CYCLE_LOCK_TTL_SEC = 600;
+// Auto-expires if a cycle dies without releasing. Deliberately shorter than a
+// cycle may run for: locations are polled one after another, so a long trigger
+// set outlives any fixed TTL, and the cycle renews the lock as it goes instead.
+// The renewal is what keeps two cycles apart; the TTL only bounds how long a
+// dead one blocks the next.
+const CYCLE_LOCK_TTL_SEC = 120;
 
 const cycleDuration = getHistogram(
   'watcher_cycle_duration_seconds',
@@ -61,6 +65,10 @@ export class WatcherService {
     private readonly redis: RedisService,
   ) {}
 
+  // Read from the environment rather than ConfigService because a decorator is
+  // evaluated when the class is loaded, before any provider exists. The value
+  // is not unvalidated for it: `watcherEnvSchema` rejects a malformed
+  // expression at boot, where the message names the variable.
   @Cron(process.env.WATCHER_CRON || CronExpression.EVERY_5_MINUTES, {
     name: 'weather-poll',
   })
@@ -76,7 +84,7 @@ export class WatcherService {
     }
     const endTimer = cycleDuration.startTimer();
     try {
-      await this.poll();
+      await this.poll(token);
     } finally {
       endTimer();
       const released = await this.redis.releaseLock(CYCLE_LOCK_KEY, token);
@@ -88,7 +96,7 @@ export class WatcherService {
     }
   }
 
-  private async poll(): Promise<void> {
+  private async poll(lockToken: string): Promise<void> {
     const triggers = await this.triggers.findActive();
     if (triggers.length === 0) {
       return;
@@ -100,6 +108,15 @@ export class WatcherService {
     );
 
     for (const group of byLocation.values()) {
+      // Renewed per location, which is the unit of work that can stall: one
+      // upstream call plus its retry. A cycle slower than the TTL would
+      // otherwise hand the next tick a free lock and run alongside it.
+      if (!(await this.renewLock(lockToken))) {
+        this.logger.error(
+          'Cycle lock lost mid-pass — stopping so a second cycle cannot overlap',
+        );
+        return;
+      }
       const { latitude, longitude } = group[0];
       let snapshot: WeatherSnapshot;
       try {
@@ -113,6 +130,23 @@ export class WatcherService {
       for (const trigger of group) {
         await this.processTrigger(trigger, snapshot);
       }
+    }
+  }
+
+  /**
+   * Keep the lock alive for another TTL. A Redis outage answers "no": the
+   * cycle stops rather than continue holding a lock it can no longer prove.
+   */
+  private async renewLock(token: string): Promise<boolean> {
+    try {
+      return await this.redis.extendLock(
+        CYCLE_LOCK_KEY,
+        token,
+        CYCLE_LOCK_TTL_SEC,
+      );
+    } catch (err) {
+      this.logger.error(`Could not renew the cycle lock: ${String(err)}`);
+      return false;
     }
   }
 

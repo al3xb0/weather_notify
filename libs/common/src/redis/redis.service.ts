@@ -6,6 +6,9 @@ import Redis from 'ioredis';
 const RELEASE_IF_OWNED =
   "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
 
+const EXTEND_IF_OWNED =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end";
+
 @Injectable()
 export class RedisService implements OnModuleDestroy {
   readonly client: Redis;
@@ -39,6 +42,15 @@ export class RedisService implements OnModuleDestroy {
   }
 
   /**
+   * Hand a cooldown window back. For the caller whose action never happened:
+   * charging a ten-minute wait for an attempt that failed on our side turns one
+   * outage into a much longer one for that user.
+   */
+  async clearCooldown(key: string): Promise<void> {
+    await this.client.del(key);
+  }
+
+  /**
    * Acquire a fenced lock: returns a unique token when the key was free, else
    * null. The token must be passed back to releaseLock so a slow holder cannot
    * delete a lock another instance has since acquired.
@@ -47,6 +59,27 @@ export class RedisService implements OnModuleDestroy {
     const token = randomUUID();
     const res = await this.client.set(key, token, 'EX', ttlSec, 'NX');
     return res === 'OK' ? token : null;
+  }
+
+  /**
+   * Renew a lock we still hold, so a long-running holder can keep it past the
+   * original TTL without ever widening the window in which a crashed holder
+   * blocks everyone else. Returns false once the lock is gone or taken over,
+   * which the caller must read as "leadership lost".
+   */
+  async extendLock(
+    key: string,
+    token: string,
+    ttlSec: number,
+  ): Promise<boolean> {
+    const res = (await this.client.eval(
+      EXTEND_IF_OWNED,
+      1,
+      key,
+      token,
+      String(ttlSec),
+    )) as number;
+    return res === 1;
   }
 
   /** Release a lock only while we still own it (compare-and-delete via Lua). */

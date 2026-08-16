@@ -65,6 +65,7 @@ describe('critical path: threshold crossed → notification delivered', () => {
   let watcher: WatcherService;
   let outbox: InMemoryOutbox;
   let relay: OutboxRelayService;
+  let emailChannel: NotificationChannel;
 
   beforeEach(() => {
     trigger = armedTrigger();
@@ -91,17 +92,14 @@ describe('critical path: threshold crossed → notification delivered', () => {
       }),
     };
 
-    const emailChannel: NotificationChannel = {
+    emailChannel = {
       channel: 'EMAIL',
       send: (event) => {
         sent.push(event);
         return Promise.resolve();
       },
     };
-    notifier = new NotifierService(
-      store as never,
-      new Map([['EMAIL', emailChannel]]),
-    );
+    notifier = new NotifierService(store, new Map([['EMAIL', emailChannel]]));
     consumer = new RabbitConsumerService(
       { get: jest.fn(), getOrThrow: jest.fn() } as never,
       notifier,
@@ -111,6 +109,7 @@ describe('critical path: threshold crossed → notification delivered', () => {
 
     const redis = {
       acquireLock: jest.fn().mockResolvedValue('token'),
+      extendLock: jest.fn().mockResolvedValue(true),
       releaseLock: jest.fn().mockResolvedValue(true),
     } as never;
 
@@ -211,6 +210,33 @@ describe('critical path: threshold crossed → notification delivered', () => {
     await watcher.runCycle();
     await deliverPublished();
     await deliverPublished(); // the broker redelivering after a lost ack
+
+    expect(sent).toHaveLength(1);
+    expect(store.all()).toHaveLength(1);
+    expect(store.all()[0].status).toBe('SENT');
+  });
+
+  // The redelivery above arrives after the first send settled. This is the
+  // harder shape: a second consumer picks the message up while the first is
+  // still inside the channel call, which a bare PENDING flag reads as an
+  // abandoned attempt and takes over — sending the alert twice.
+  it('lets only one consumer send when two race on the same redelivery', async () => {
+    await watcher.runCycle();
+
+    let releaseSend!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    emailChannel.send = async (event) => {
+      sent.push(event);
+      await inFlight;
+    };
+
+    const event = published[0].event;
+    const first = broker.run(consumer, 'EMAIL', messageFor(event) as never);
+    const second = broker.run(consumer, 'EMAIL', messageFor(event) as never);
+    releaseSend();
+    await Promise.all([first, second]);
 
     expect(sent).toHaveLength(1);
     expect(store.all()).toHaveLength(1);

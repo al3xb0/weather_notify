@@ -1,6 +1,10 @@
+// Prefixed with `mock` so the hoisted factory below may close over it, which
+// is what lets the backlog gauge be asserted on rather than merely stubbed.
+const mockBacklogSet = jest.fn();
+
 jest.mock('@app/common', () => ({
   getCounter: () => ({ inc: jest.fn() }),
-  getGauge: () => ({ set: jest.fn() }),
+  getGauge: () => ({ set: mockBacklogSet }),
   RedisService: class {},
 }));
 
@@ -20,6 +24,7 @@ const row = (id: string, routingKey = 'email.fired'): PendingOutboxEvent => ({
 describe('OutboxRelayService', () => {
   let outbox: {
     findPending: jest.Mock;
+    countPending: jest.Mock;
     markPublished: jest.Mock;
     prunePublished: jest.Mock;
   };
@@ -28,8 +33,10 @@ describe('OutboxRelayService', () => {
   let relay: OutboxRelayService;
 
   beforeEach(() => {
+    mockBacklogSet.mockClear();
     outbox = {
       findPending: jest.fn().mockResolvedValue([]),
+      countPending: jest.fn().mockResolvedValue(0),
       markPublished: jest.fn().mockResolvedValue(undefined),
       prunePublished: jest.fn().mockResolvedValue(0),
     };
@@ -106,6 +113,35 @@ describe('OutboxRelayService', () => {
     outbox.findPending.mockRejectedValue(new Error('db down'));
 
     await expect(relay.runRelay()).resolves.toBeUndefined();
+  });
+
+  describe('backlog gauge', () => {
+    // The gauge exists to show the relay falling behind; derived from the
+    // capped batch it would read `batchSize` forever instead.
+    it('reports what is still staged, not what one batch held', async () => {
+      outbox.findPending.mockResolvedValue([row('1'), row('2')]);
+      outbox.countPending.mockResolvedValue(4_998);
+
+      await relay.flush();
+
+      expect(mockBacklogSet).toHaveBeenLastCalledWith(4_998);
+    });
+
+    it('reports an empty outbox without counting again', async () => {
+      outbox.findPending.mockResolvedValue([]);
+
+      await relay.flush();
+
+      expect(mockBacklogSet).toHaveBeenCalledWith(0);
+      expect(outbox.countPending).not.toHaveBeenCalled();
+    });
+
+    it('does not fail the pass when the count itself fails', async () => {
+      outbox.findPending.mockResolvedValue([row('1')]);
+      outbox.countPending.mockRejectedValue(new Error('db down'));
+
+      await expect(relay.flush()).resolves.toBe(1);
+    });
   });
 
   it('prunes only rows relayed before the retention window', async () => {

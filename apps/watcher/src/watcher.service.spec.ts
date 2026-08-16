@@ -29,7 +29,11 @@ type Mocked = {
   };
   weather: { getSnapshot: jest.Mock };
   outbox: { flush: jest.Mock };
-  redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
+  redis: {
+    acquireLock: jest.Mock;
+    extendLock: jest.Mock;
+    releaseLock: jest.Mock;
+  };
 };
 
 /** A quiet-hours window that provably contains the current instant. */
@@ -93,6 +97,7 @@ describe('WatcherService', () => {
       outbox: { flush: jest.fn().mockResolvedValue(0) },
       redis: {
         acquireLock: jest.fn().mockResolvedValue('lock-token'),
+        extendLock: jest.fn().mockResolvedValue(true),
         releaseLock: jest.fn().mockResolvedValue(true),
       },
     };
@@ -132,6 +137,49 @@ describe('WatcherService', () => {
         'watcher:cycle:lock',
         'lock-token',
       );
+    });
+
+    // Locations are polled one after another, so a large trigger set outlives
+    // any fixed TTL. Without renewal the lock expires mid-pass and the next
+    // tick starts a cycle alongside this one.
+    it('renews the lock before each location', async () => {
+      m.triggers.findActive.mockResolvedValue([
+        makeTrigger({ id: 't1' }),
+        makeTrigger({ id: 't2', latitude: 48.85, longitude: 2.35 }),
+      ]);
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
+
+      await service.runCycle();
+
+      expect(m.redis.extendLock).toHaveBeenCalledTimes(2);
+      expect(m.redis.extendLock).toHaveBeenCalledWith(
+        'watcher:cycle:lock',
+        'lock-token',
+        120,
+      );
+    });
+
+    it('stops the pass when the lock is lost mid-cycle', async () => {
+      m.triggers.findActive.mockResolvedValue([
+        makeTrigger({ id: 't1' }),
+        makeTrigger({ id: 't2', latitude: 48.85, longitude: 2.35 }),
+      ]);
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
+      m.redis.extendLock.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+      await service.runCycle();
+
+      expect(m.weather.getSnapshot).toHaveBeenCalledTimes(1);
+      expect(m.triggers.recordObservation).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops the pass when Redis cannot be reached to renew', async () => {
+      m.triggers.findActive.mockResolvedValue([makeTrigger()]);
+      m.redis.extendLock.mockRejectedValue(new Error('redis down'));
+
+      await expect(service.runCycle()).resolves.toBeUndefined();
+
+      expect(m.weather.getSnapshot).not.toHaveBeenCalled();
     });
   });
 

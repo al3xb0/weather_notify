@@ -22,6 +22,12 @@ export interface OutboxFlusher {
 export interface OutboxRepository {
   /** Oldest staged deliveries first — order preserves the firing sequence. */
   findPending(limit: number): Promise<PendingOutboxEvent[]>;
+  /**
+   * Everything still staged, batch size notwithstanding. `findPending` cannot
+   * answer this: it is capped, so a backlog reported from its length reads as
+   * the batch size no matter how far behind the relay actually is.
+   */
+  countPending(): Promise<number>;
   markPublished(ids: string[]): Promise<void>;
   /** Drop rows that were handed to the broker before `before`. */
   prunePublished(before: Date): Promise<number>;

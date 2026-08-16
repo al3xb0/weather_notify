@@ -28,13 +28,16 @@ const TRIGGER = {
 describe('SendTestNotificationHandler', () => {
   let triggers: { findOwned: jest.Mock };
   let publisher: { publish: jest.Mock };
-  let redis: { consumeCooldown: jest.Mock };
+  let redis: { consumeCooldown: jest.Mock; clearCooldown: jest.Mock };
   let handler: SendTestNotificationHandler;
 
   beforeEach(() => {
     triggers = { findOwned: jest.fn().mockResolvedValue(TRIGGER) };
     publisher = { publish: jest.fn().mockResolvedValue(undefined) };
-    redis = { consumeCooldown: jest.fn().mockResolvedValue(0) };
+    redis = {
+      consumeCooldown: jest.fn().mockResolvedValue(0),
+      clearCooldown: jest.fn().mockResolvedValue(undefined),
+    };
     handler = new SendTestNotificationHandler(
       triggers as never,
       publisher,
@@ -82,5 +85,27 @@ describe('SendTestNotificationHandler', () => {
     triggers.findOwned.mockRejectedValue(new Error('Trigger not found'));
     await expect(run()).rejects.toThrow('Trigger not found');
     expect(redis.consumeCooldown).not.toHaveBeenCalled();
+  });
+
+  // Unlike a fired trigger, a test send is owed to nobody: it is not staged,
+  // so a broker outage has to be reported rather than absorbed.
+  describe('when the broker refuses the publish', () => {
+    beforeEach(() => {
+      publisher.publish.mockRejectedValue(new Error('broker down'));
+    });
+
+    it('answers 503 instead of a bare 500', async () => {
+      await expect(run()).rejects.toMatchObject({ status: 503 });
+    });
+
+    it('refunds the cooldown, since the attempt failed on our side', async () => {
+      await expect(run()).rejects.toThrow();
+      expect(redis.clearCooldown).toHaveBeenCalledWith('trigger-test:u1');
+    });
+
+    it('still reports the outage when the refund fails', async () => {
+      redis.clearCooldown.mockRejectedValue(new Error('redis down'));
+      await expect(run()).rejects.toMatchObject({ status: 503 });
+    });
   });
 });

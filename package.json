@@ -113,19 +113,20 @@
       "apps/**/*.ts",
       "libs/**/*.ts",
       "!**/*.spec.ts",
+      "!**/*.e2e-spec.ts",
+      "!**/test/**",
       "!**/main.ts",
       "!**/*.module.ts",
       "!**/index.ts",
-      "!**/*.types.ts",
-      "!test/support/**"
+      "!**/*.types.ts"
     ],
     "coverageDirectory": "./coverage",
     "coverageThreshold": {
       "global": {
-        "statements": 42,
-        "branches": 42,
-        "functions": 30,
-        "lines": 42
+        "statements": 62,
+        "branches": 53,
+        "functions": 53,
+        "lines": 62
       }
     },
     "testEnvironment": "node",

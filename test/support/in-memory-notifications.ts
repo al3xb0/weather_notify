@@ -1,106 +1,123 @@
-import { Prisma } from '@prisma/client';
 import { Channel, NotifStatus, TriggerFiredEvent } from '@app/contracts';
+import type {
+  ClaimResult,
+  DeliveryLogRepository,
+} from '../../apps/notifier/src/ports/delivery-log.repository';
 
 export interface NotificationRow {
   id: string;
-  eventId: string | null;
+  eventId: string;
   triggerId: string | null;
   userId: string;
   channel: Channel;
   status: NotifStatus;
   payload: unknown;
   error: string | null;
+  claimedAt: Date | null;
+  deliveredTo: string[];
 }
 
-type CreateArgs = { data: Omit<NotificationRow, 'id'> };
-type UniqueWhere = {
-  where: { eventId_channel: { eventId: string; channel: Channel } };
-};
-
 /**
- * Stands in for the notification table, enforcing the same unique
- * (eventId, channel) constraint the migration adds. Without that constraint
- * the idempotency assertions below would pass against anything.
+ * The delivery log without a database, enforcing the same one-row-per
+ * (eventId, channel) rule the unique index does — without it the idempotency
+ * assertions would pass against anything — and the same lease semantics: a row
+ * someone else still holds is not up for grabs.
  */
-export class InMemoryNotifications {
+export class InMemoryNotifications implements DeliveryLogRepository {
   private readonly rows: NotificationRow[] = [];
   private seq = 0;
 
-  readonly notification = {
-    create: ({ data }: CreateArgs): Promise<NotificationRow> => {
-      if (this.find(data.eventId, data.channel)) {
-        return Promise.reject(uniqueViolation());
-      }
-      const row = { id: `n${++this.seq}`, ...data };
-      this.rows.push(row);
-      return Promise.resolve(row);
-    },
+  claim(
+    channel: Channel,
+    event: TriggerFiredEvent,
+    leaseCutoff: Date,
+  ): Promise<ClaimResult> {
+    const now = new Date();
+    const existing = this.find(event.eventId, channel);
+    if (!existing) {
+      this.rows.push({
+        id: `n${++this.seq}`,
+        eventId: event.eventId,
+        triggerId: event.triggerId,
+        userId: event.userId,
+        channel,
+        status: NotifStatus.PENDING,
+        payload: event,
+        error: null,
+        claimedAt: now,
+        deliveredTo: [],
+      });
+      return Promise.resolve('claimed');
+    }
+    if (existing.status === NotifStatus.SENT) {
+      return Promise.resolve('duplicate');
+    }
+    if (existing.claimedAt !== null && existing.claimedAt >= leaseCutoff) {
+      return Promise.resolve('in_flight');
+    }
+    existing.status = NotifStatus.PENDING;
+    existing.claimedAt = now;
+    existing.error = null;
+    return Promise.resolve('claimed');
+  }
 
-    findUnique: ({ where }: UniqueWhere): Promise<NotificationRow | null> =>
-      Promise.resolve(
-        this.find(where.eventId_channel.eventId, where.eventId_channel.channel),
-      ),
+  releaseClaim(channel: Channel, eventId: string): Promise<void> {
+    const row = this.find(eventId, channel);
+    if (row?.status === NotifStatus.PENDING) {
+      row.claimedAt = null;
+    }
+    return Promise.resolve();
+  }
 
-    update: ({
-      where,
-      data,
-    }: {
-      where: { id: string };
-      data: Partial<NotificationRow>;
-    }): Promise<NotificationRow> => {
-      const row = this.rows.find((r) => r.id === where.id);
-      if (!row) {
-        throw new Error(`No notification ${where.id}`);
-      }
-      Object.assign(row, data);
-      return Promise.resolve(row);
-    },
+  settle(
+    channel: Channel,
+    event: TriggerFiredEvent,
+    status: NotifStatus,
+    error?: string,
+  ): Promise<void> {
+    const row = this.find(event.eventId, channel);
+    if (row) {
+      row.status = status;
+      row.error = error ?? null;
+      return Promise.resolve();
+    }
+    this.rows.push({
+      id: `n${++this.seq}`,
+      eventId: event.eventId,
+      triggerId: event.triggerId,
+      userId: event.userId,
+      channel,
+      status,
+      payload: event,
+      error: error ?? null,
+      claimedAt: null,
+      deliveredTo: [],
+    });
+    return Promise.resolve();
+  }
 
-    upsert: ({
-      where,
-      create,
-      update,
-    }: UniqueWhere & {
-      create: Omit<NotificationRow, 'id'>;
-      update: Partial<NotificationRow>;
-    }): Promise<NotificationRow> => {
-      const existing = this.find(
-        where.eventId_channel.eventId,
-        where.eventId_channel.channel,
-      );
-      if (existing) {
-        Object.assign(existing, update);
-        return Promise.resolve(existing);
-      }
-      const row = { id: `n${++this.seq}`, ...create };
-      this.rows.push(row);
-      return Promise.resolve(row);
-    },
-  };
+  deliveredDestinations(channel: Channel, eventId: string): Promise<string[]> {
+    return Promise.resolve(this.find(eventId, channel)?.deliveredTo ?? []);
+  }
+
+  markDelivered(
+    channel: Channel,
+    eventId: string,
+    destination: string,
+  ): Promise<void> {
+    this.find(eventId, channel)?.deliveredTo.push(destination);
+    return Promise.resolve();
+  }
 
   all(): NotificationRow[] {
     return [...this.rows];
   }
 
-  private find(
-    eventId: string | null,
-    channel: Channel,
-  ): NotificationRow | null {
-    if (eventId === null) {
-      return null; // NULLs are distinct in the real unique index too.
-    }
-    return (
-      this.rows.find((r) => r.eventId === eventId && r.channel === channel) ??
-      null
+  private find(eventId: string, channel: Channel): NotificationRow | undefined {
+    return this.rows.find(
+      (row) => row.eventId === eventId && row.channel === channel,
     );
   }
-}
-
-function uniqueViolation(): Prisma.PrismaClientKnownRequestError {
-  return new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-    code: 'P2002',
-    clientVersion: 'in-memory',
-  });
 }
 
 export function messageFor(

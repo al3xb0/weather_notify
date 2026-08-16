@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '@app/database';
+import { Inject, Injectable } from '@nestjs/common';
 import { MailService } from '@app/common';
 import { Channel, TriggerFiredEvent } from '@app/contracts';
+import { RECIPIENTS_REPOSITORY } from '../ports/recipients.repository';
+import type { RecipientsRepository } from '../ports/recipients.repository';
 import {
   NotificationChannel,
   PermanentNotificationError,
@@ -13,7 +14,8 @@ export class EmailChannel implements NotificationChannel {
   readonly channel = Channel.EMAIL;
 
   constructor(
-    private readonly prisma: PrismaService,
+    @Inject(RECIPIENTS_REPOSITORY)
+    private readonly recipients: RecipientsRepository,
     private readonly mail: MailService,
   ) {}
 
@@ -21,18 +23,16 @@ export class EmailChannel implements NotificationChannel {
     if (!this.mail.configured) {
       throw new PermanentNotificationError('Mailer is not configured');
     }
-    const user = await this.prisma.user.findUnique({
-      where: { id: event.userId },
-    });
-    if (!user?.email) {
+    const recipient = await this.recipients.emailRecipient(event.userId);
+    if (!recipient?.email) {
       throw new PermanentNotificationError('User has no email');
     }
-    if (!user.emailVerified) {
+    if (!recipient.verified) {
       throw new PermanentNotificationError('Email is not verified');
     }
 
     await this.mail.send({
-      to: user.email,
+      to: recipient.email,
       subject: alertTitle(event),
       html: alertHtml(event),
     });

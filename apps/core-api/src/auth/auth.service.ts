@@ -11,7 +11,7 @@ import { JwtService } from '@nestjs/jwt';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
-import { MailService } from '@app/common';
+import { MailService, RedisService } from '@app/common';
 import { UsersService } from '../users/users.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { RegisterDto } from './dto/register.dto';
@@ -20,6 +20,8 @@ import { RefreshPayload, Tokens } from './types';
 
 const BCRYPT_ROUNDS = 12;
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+const PRUNE_LOCK_KEY = 'core-api:refresh-tokens:prune';
+const PRUNE_LOCK_TTL_SEC = 300;
 
 @Injectable()
 export class AuthService {
@@ -36,6 +38,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly mail: MailService,
     private readonly metrics: MetricsService,
+    private readonly redis: RedisService,
     config: ConfigService,
   ) {
     this.accessSecret = config.getOrThrow<string>('JWT_ACCESS_SECRET');
@@ -53,7 +56,12 @@ export class AuthService {
   async register(dto: RegisterDto): Promise<Tokens> {
     const existing = await this.users.findByEmail(dto.email);
     if (existing) {
-      throw new ConflictException('Unable to register with these details');
+      // Says plainly what the 409 already gives away. The vaguer wording that
+      // stood here bought nothing: a status code that only ever means "this
+      // email is taken" is the disclosure, and dressing the message up only
+      // left the user guessing at a problem they can fix. Enumeration is
+      // bounded instead by the throttler on this route.
+      throw new ConflictException('An account with this email already exists');
     }
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     const user = await this.users.create(dto.email, passwordHash);
@@ -200,13 +208,28 @@ export class AuthService {
 
   // Refresh tokens are single-use and short-lived; revoked/expired rows are
   // dead weight, so sweep them daily to keep the table bounded.
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { name: 'refresh-token-prune' })
   async pruneStaleTokens(): Promise<void> {
-    const { count } = await this.prisma.refreshToken.deleteMany({
-      where: { OR: [{ revoked: true }, { expiresAt: { lt: new Date() } }] },
-    });
-    if (count > 0) {
-      this.logger.log(`Pruned ${count} stale refresh token(s)`);
+    // Every replica runs this cron. The delete is idempotent, so the lock is
+    // not there for correctness — it keeps N replicas from opening N identical
+    // full-table deletes at the same instant, and matches how the notification
+    // sweep next door already behaves.
+    const token = await this.redis.acquireLock(
+      PRUNE_LOCK_KEY,
+      PRUNE_LOCK_TTL_SEC,
+    );
+    if (!token) {
+      return;
+    }
+    try {
+      const { count } = await this.prisma.refreshToken.deleteMany({
+        where: { OR: [{ revoked: true }, { expiresAt: { lt: new Date() } }] },
+      });
+      if (count > 0) {
+        this.logger.log(`Pruned ${count} stale refresh token(s)`);
+      }
+    } finally {
+      await this.redis.releaseLock(PRUNE_LOCK_KEY, token);
     }
   }
 
@@ -226,24 +249,26 @@ export class AuthService {
     );
 
     const refreshMs = this.refreshTtlMs;
-    const row = await this.prisma.refreshToken.create({
-      data: {
-        userId,
-        tokenHash: 'pending',
-        expiresAt: new Date(Date.now() + refreshMs),
-      },
-    });
-
+    // The row id is the token's jti, so generating it here lets the token be
+    // signed before the row exists — one insert holding the real fingerprint,
+    // instead of an insert of the placeholder "pending" followed by an update.
+    // That placeholder was a hash no token could ever produce, briefly visible
+    // to anything reading the table.
+    const jti = randomUUID();
     const refreshToken = await this.jwt.signAsync(
-      { sub: userId, email, jti: row.id },
+      { sub: userId, email, jti },
       {
         secret: this.refreshSecret,
         expiresIn: Math.floor(refreshMs / 1000),
       },
     );
-    await this.prisma.refreshToken.update({
-      where: { id: row.id },
-      data: { tokenHash: hashToken(refreshToken) },
+    await this.prisma.refreshToken.create({
+      data: {
+        id: jti,
+        userId,
+        tokenHash: hashToken(refreshToken),
+        expiresAt: new Date(Date.now() + refreshMs),
+      },
     });
 
     return { accessToken, refreshToken };

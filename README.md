@@ -76,8 +76,17 @@ one line: **`libs/domain` is pure, everything else may be infrastructure.**
 `libs/domain` imports nothing from Nest, Prisma, or any IO package, and an eslint
 `no-restricted-imports` rule scoped to that directory keeps it that way. That is
 the whole boundary. Ports exist only where something real crosses it — the
-upstream weather API, the broker, and the watcher's read model — not as a uniform
-tax on every service.
+upstream weather API, the broker, and the read models of the two workers — not as
+a uniform tax on every service.
+
+That last part is a rule, not a mood: **the workers reach persistence through
+ports; core-api does not.** A worker's collaborators are the things that fail
+independently, and a delivery path that cannot be exercised without a database is
+a delivery path nobody tests properly — the notifier's channels used to query
+Prisma directly, which is why its retry and claim behaviour was asserted against
+mocked query shapes rather than against behaviour. core-api stays flat because
+its controllers *are* the database, near enough: a port there would be a second
+name for the same CRUD.
 
 ### Why does `libs/database` know about the domain, and not the reverse?
 
@@ -223,8 +232,24 @@ two lines leaves the message on both queues, and the second copy would be
 delivered again. The unique index is the arbiter, so two consumers racing on the
 same redelivery cannot both win.
 
-`PENDING` is also a signal in its own right: a row stuck there means a notifier
-died mid-send.
+A claim is a **lease**, not a flag. `PENDING` on its own cannot tell a consumer
+that is inside the channel call right now from one that died mid-send, and
+taking the row over in the first case sends the alert twice. `claimedAt` dates
+the attempt: the take-over is one conditional `UPDATE` that matches only rows
+nobody holds — unclaimed, or claimed longer ago than the lease — and a consumer
+that matches nothing raises a retryable error rather than sending. By the next
+attempt the holder has either settled the row, which reads as an ordinary
+duplicate, or died, and its lease has expired.
+
+A failed send hands the lease straight back, because the retry that follows is
+the same delivery continuing rather than a second consumer; a consumer that dies
+instead leaves the lease to expire on its own. A row still `PENDING` with an
+expired lease is therefore a real signal: a notifier died mid-send.
+
+One claim covers one channel, which is the wrong grain for **web push**: it fans
+out to every browser subscription the user registered, and one of them failing
+retries the event as a whole. `deliveredTo` records the endpoints an attempt
+actually reached, so the retry re-sends only to the devices still owed the alert.
 
 ### Transactional outbox
 
@@ -246,7 +271,10 @@ but not yet marked is simply redelivered — which lands back on the
 `(eventId, channel)` claim.
 
 Relayed rows are swept after 24 hours; `watcher_outbox_pending` is the gauge to
-alert on, since a growing backlog means the relay is not keeping up.
+alert on, since a growing backlog means the relay is not keeping up. It counts
+the staged rows directly rather than measuring the batch it just drained — a
+batch is capped at `OUTBOX_BATCH_SIZE`, so a gauge derived from it would sit at
+exactly that number however far behind the relay fell.
 
 ### Retention
 
@@ -402,14 +430,26 @@ Honest list of what would break first, and what it would take.
 
 **The watcher is a single instance.** Concurrency is prevented by a Redis lock
 rather than by design, so a second instance would idle instead of sharing load.
+The lock is renewed per location as the cycle walks them, because a cycle that
+polls locations one at a time outlives any fixed TTL once the trigger set grows,
+and an expired lock is an invitation for the next tick to run alongside it.
 Sharding by a hash of the location would let instances split the trigger set with
 no coordination, since triggers are already grouped by location.
 
+**Telegram polling is single-instance too, but core-api is not.** The API scales
+horizontally; `getUpdates`, which Telegram refuses to serve to two pollers at
+once, is elected through a renewed Redis lock, so extra replicas stand by and
+take over within the lock's TTL if the poller stops. A webhook would remove the
+election entirely, at the cost of a publicly reachable HTTPS endpoint.
+
 **Open-Meteo is polled per location, sequentially.** Locations are deduplicated
-(triggers rounded to two decimals share one call) and cached in Redis for ten
-minutes, so the current cost is low. Open-Meteo accepts batched coordinates,
-which is where this goes if the location count grows faster than the cache
-absorbs it.
+(triggers rounded to two decimals share one call) and cached in Redis for four
+minutes, so the current cost is low. The TTL is deliberately under the poll
+interval: a longer-lived entry is handed back to the next cycle, which then
+re-evaluates data the previous one already acted upon — writes and wall time
+spent on a decision that cannot come out differently. Open-Meteo accepts batched
+coordinates, which is where this goes if the location count grows faster than
+the cache absorbs it.
 
 **Notification history lives in the primary database.** It is append-only, never
 joined against, and read as one paginated list. It will outgrow the tables the API

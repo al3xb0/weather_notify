@@ -3,9 +3,8 @@ jest.mock('@app/common', () => ({
   getHistogram: () => ({ startTimer: () => jest.fn() }),
 }));
 
-import { Prisma } from '@prisma/client';
 import { NotifStatus, TriggerFiredEvent } from '@app/contracts';
-import { NotifierService } from './notifier.service';
+import { DeliveryInFlightError, NotifierService } from './notifier.service';
 import { PermanentNotificationError } from './channels/channel.types';
 
 const event: TriggerFiredEvent = {
@@ -22,36 +21,28 @@ const event: TriggerFiredEvent = {
   firedAt: new Date().toISOString(),
 };
 
-const uniqueViolation = () =>
-  new Prisma.PrismaClientKnownRequestError('duplicate', {
-    code: 'P2002',
-    clientVersion: 'test',
-  });
-
 describe('NotifierService', () => {
-  let prisma: {
-    notification: {
-      create: jest.Mock;
-      findUnique: jest.Mock;
-      update: jest.Mock;
-      upsert: jest.Mock;
-    };
+  let deliveries: {
+    claim: jest.Mock;
+    releaseClaim: jest.Mock;
+    settle: jest.Mock;
+    deliveredDestinations: jest.Mock;
+    markDelivered: jest.Mock;
   };
   let email: { channel: 'EMAIL'; send: jest.Mock };
   let service: NotifierService;
 
   beforeEach(() => {
-    prisma = {
-      notification: {
-        create: jest.fn().mockResolvedValue({ id: 'n1' }),
-        findUnique: jest.fn().mockResolvedValue(null),
-        update: jest.fn().mockResolvedValue({}),
-        upsert: jest.fn().mockResolvedValue({}),
-      },
+    deliveries = {
+      claim: jest.fn().mockResolvedValue('claimed'),
+      releaseClaim: jest.fn().mockResolvedValue(undefined),
+      settle: jest.fn().mockResolvedValue(undefined),
+      deliveredDestinations: jest.fn().mockResolvedValue([]),
+      markDelivered: jest.fn().mockResolvedValue(undefined),
     };
     email = { channel: 'EMAIL', send: jest.fn().mockResolvedValue(undefined) };
     service = new NotifierService(
-      prisma as never,
+      deliveries,
       new Map([['EMAIL', email]]) as never,
     );
   });
@@ -64,105 +55,106 @@ describe('NotifierService', () => {
     await expect(service.dispatch('TELEGRAM', event)).rejects.toBeInstanceOf(
       PermanentNotificationError,
     );
-    expect(prisma.notification.create).not.toHaveBeenCalled();
+    expect(deliveries.claim).not.toHaveBeenCalled();
   });
 
   describe('idempotent dispatch', () => {
-    it('claims the (event, channel) pair as PENDING before sending', async () => {
+    it('claims the (event, channel) pair before sending', async () => {
       await service.dispatch('EMAIL', event);
-      const claim = prisma.notification.create.mock.calls[0][0] as {
-        data: Record<string, unknown>;
-      };
-      expect(claim.data).toMatchObject({
-        eventId: 'e1',
-        channel: 'EMAIL',
-        status: NotifStatus.PENDING,
-      });
+
+      expect(deliveries.claim).toHaveBeenCalledWith(
+        'EMAIL',
+        event,
+        expect.any(Date),
+      );
       // The claim must land before the channel call, not after.
-      expect(
-        prisma.notification.create.mock.invocationCallOrder[0],
-      ).toBeLessThan(email.send.mock.invocationCallOrder[0]);
+      expect(deliveries.claim.mock.invocationCallOrder[0]).toBeLessThan(
+        email.send.mock.invocationCallOrder[0],
+      );
       expect(email.send).toHaveBeenCalledWith(event);
+    });
+
+    // The cutoff is what separates an abandoned attempt from a live one, so it
+    // has to be a point in the past rather than "now".
+    it('offers a lease cutoff a minute behind the clock', async () => {
+      await service.dispatch('EMAIL', event);
+
+      const [, , cutoff] = deliveries.claim.mock.calls[0] as [
+        string,
+        unknown,
+        Date,
+      ];
+      expect(Date.now() - cutoff.getTime()).toBeGreaterThanOrEqual(59_000);
     });
 
     it('settles the claimed row to SENT after a successful send', async () => {
       await expect(service.dispatch('EMAIL', event)).resolves.toBe('sent');
-      const upsert = prisma.notification.upsert.mock.calls[0][0] as {
-        where: unknown;
-        update: Record<string, unknown>;
-      };
-      expect(upsert.where).toEqual({
-        eventId_channel: { eventId: 'e1', channel: 'EMAIL' },
-      });
-      expect(upsert.update).toMatchObject({ status: NotifStatus.SENT });
+      expect(deliveries.settle).toHaveBeenCalledWith(
+        'EMAIL',
+        event,
+        NotifStatus.SENT,
+        undefined,
+      );
     });
 
     it('skips a redelivery of an already SENT event', async () => {
-      prisma.notification.create.mockRejectedValue(uniqueViolation());
-      prisma.notification.findUnique.mockResolvedValue({
-        id: 'n1',
-        status: NotifStatus.SENT,
-      });
+      deliveries.claim.mockResolvedValue('duplicate');
 
       await expect(service.dispatch('EMAIL', event)).resolves.toBe('skipped');
       expect(email.send).not.toHaveBeenCalled();
-      expect(prisma.notification.upsert).not.toHaveBeenCalled();
+      expect(deliveries.settle).not.toHaveBeenCalled();
     });
 
-    it('takes over a row left PENDING by a crashed attempt', async () => {
-      prisma.notification.create.mockRejectedValue(uniqueViolation());
-      prisma.notification.findUnique.mockResolvedValue({
-        id: 'n1',
-        status: NotifStatus.PENDING,
-      });
+    // The whole point of the lease: PENDING alone cannot tell a dead attempt
+    // from a live one, and taking over a live one sends the alert twice.
+    it('refuses to send while another consumer holds the claim', async () => {
+      deliveries.claim.mockResolvedValue('in_flight');
 
-      await expect(service.dispatch('EMAIL', event)).resolves.toBe('sent');
-      expect(prisma.notification.update).toHaveBeenCalledWith({
-        where: { id: 'n1' },
-        data: { status: NotifStatus.PENDING, error: null },
-      });
-      expect(email.send).toHaveBeenCalledTimes(1);
-    });
-
-    it('retries a row a previous attempt marked FAILED', async () => {
-      prisma.notification.create.mockRejectedValue(uniqueViolation());
-      prisma.notification.findUnique.mockResolvedValue({
-        id: 'n1',
-        status: NotifStatus.FAILED,
-      });
-
-      await expect(service.dispatch('EMAIL', event)).resolves.toBe('sent');
-      expect(email.send).toHaveBeenCalledTimes(1);
-    });
-
-    it('propagates a non-unique database error instead of swallowing it', async () => {
-      prisma.notification.create.mockRejectedValue(
-        new Error('connection lost'),
+      await expect(service.dispatch('EMAIL', event)).rejects.toBeInstanceOf(
+        DeliveryInFlightError,
       );
+      expect(email.send).not.toHaveBeenCalled();
+      expect(deliveries.settle).not.toHaveBeenCalled();
+    });
+
+    it('propagates a database error instead of swallowing it', async () => {
+      deliveries.claim.mockRejectedValue(new Error('connection lost'));
+
       await expect(service.dispatch('EMAIL', event)).rejects.toThrow(
         'connection lost',
       );
       expect(email.send).not.toHaveBeenCalled();
     });
 
-    it('leaves the row claimed when the channel throws, so a retry can take over', async () => {
+    it('hands the claim back when the channel throws, so its own retry is not blocked', async () => {
       email.send.mockRejectedValue(new Error('smtp down'));
+
       await expect(service.dispatch('EMAIL', event)).rejects.toThrow(
         'smtp down',
       );
       // No settle here — the consumer decides between retry and FAILED.
-      expect(prisma.notification.upsert).not.toHaveBeenCalled();
+      expect(deliveries.settle).not.toHaveBeenCalled();
+      expect(deliveries.releaseClaim).toHaveBeenCalledWith('EMAIL', 'e1');
+    });
+
+    it('still reports the channel failure when releasing the claim fails', async () => {
+      email.send.mockRejectedValue(new Error('smtp down'));
+      deliveries.releaseClaim.mockRejectedValue(new Error('db down'));
+
+      await expect(service.dispatch('EMAIL', event)).rejects.toThrow(
+        'smtp down',
+      );
     });
   });
 
   it('settle writes the terminal status and error', async () => {
     await service.settle('EMAIL', event, NotifStatus.FAILED, 'smtp down');
-    const upsert = prisma.notification.upsert.mock.calls[0][0] as {
-      update: Record<string, unknown>;
-    };
-    expect(upsert.update).toEqual({
-      status: NotifStatus.FAILED,
-      error: 'smtp down',
-    });
+
+    expect(deliveries.settle).toHaveBeenCalledWith(
+      'EMAIL',
+      event,
+      NotifStatus.FAILED,
+      'smtp down',
+    );
   });
 });

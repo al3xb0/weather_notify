@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { PrismaService } from '@app/database';
 import { User } from '@prisma/client';
 import {
@@ -70,7 +70,7 @@ export class UsersService {
     await this.prisma.user.update({
       where: { id: userId },
       data: {
-        telegramLinkToken: token,
+        telegramLinkTokenHash: hashLinkToken(token),
         telegramLinkTokenExpiresAt: new Date(Date.now() + TELEGRAM_LINK_TTL_MS),
       },
     });
@@ -83,7 +83,7 @@ export class UsersService {
       where: { id: userId },
       data: {
         telegramChatId: null,
-        telegramLinkToken: null,
+        telegramLinkTokenHash: null,
         telegramLinkTokenExpiresAt: null,
       },
     });
@@ -93,7 +93,7 @@ export class UsersService {
   /** Bind a Telegram chat id to the user owning the given link token (bot side). */
   async bindTelegram(token: string, chatId: string): Promise<boolean> {
     const user = await this.prisma.user.findUnique({
-      where: { telegramLinkToken: token },
+      where: { telegramLinkTokenHash: hashLinkToken(token) },
     });
     if (!user) {
       return false;
@@ -103,7 +103,10 @@ export class UsersService {
       // Expired token: clear it so a stale deep-link cannot be reused.
       await this.prisma.user.update({
         where: { id: user.id },
-        data: { telegramLinkToken: null, telegramLinkTokenExpiresAt: null },
+        data: {
+          telegramLinkTokenHash: null,
+          telegramLinkTokenExpiresAt: null,
+        },
       });
       return false;
     }
@@ -111,7 +114,7 @@ export class UsersService {
       where: { id: user.id },
       data: {
         telegramChatId: chatId,
-        telegramLinkToken: null,
+        telegramLinkTokenHash: null,
         telegramLinkTokenExpiresAt: null,
       },
     });
@@ -160,4 +163,13 @@ export class UsersService {
     });
     return { success: true };
   }
+}
+
+/**
+ * Fingerprint a deep-link token for storage. The token is a UUID handed to the
+ * user, so the stored value is only ever compared against a hash of what the
+ * bot presents — a dump of this table yields no usable link.
+ */
+function hashLinkToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }

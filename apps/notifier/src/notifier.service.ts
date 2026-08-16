@@ -1,11 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { PrismaService } from '@app/database';
 import { getCounter, getHistogram } from '@app/common';
 import { Channel, NotifStatus, TriggerFiredEvent } from '@app/contracts';
 import { CHANNEL_REGISTRY } from './channels/channel.registry';
 import type { ChannelRegistry } from './channels/channel.registry';
 import { PermanentNotificationError } from './channels/channel.types';
+import { DELIVERY_LOG_REPOSITORY } from './ports/delivery-log.repository';
+import type { DeliveryLogRepository } from './ports/delivery-log.repository';
 
 const notificationsTotal = getCounter(
   'notifier_notifications_total',
@@ -28,16 +28,35 @@ const duplicatesSkipped = getCounter(
   ['channel'],
 );
 
-const UNIQUE_VIOLATION = 'P2002';
+/**
+ * How long a claim is honoured before another consumer may take the row over.
+ * Longer than any channel call (each has its own timeout), short enough that a
+ * consumer killed mid-send does not park the delivery for long.
+ */
+const CLAIM_LEASE_MS = 60_000;
 
 export type DispatchOutcome = 'sent' | 'skipped';
+
+/**
+ * Raised when another consumer holds an unexpired claim on this (event,
+ * channel). Retryable on purpose: by the next attempt the holder has either
+ * settled the row — which then reads as an ordinary duplicate — or died, and
+ * its lease has expired for us to take over.
+ */
+export class DeliveryInFlightError extends Error {
+  constructor(channel: Channel) {
+    super(`Another consumer is already delivering this event on ${channel}`);
+    this.name = 'DeliveryInFlightError';
+  }
+}
 
 @Injectable()
 export class NotifierService {
   private readonly logger = new Logger(NotifierService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    @Inject(DELIVERY_LOG_REPOSITORY)
+    private readonly deliveries: DeliveryLogRepository,
     @Inject(CHANNEL_REGISTRY) private readonly senders: ChannelRegistry,
   ) {}
 
@@ -63,10 +82,18 @@ export class NotifierService {
       );
     }
 
-    if (!(await this.claim(channel, event))) {
+    const claim = await this.deliveries.claim(
+      channel,
+      event,
+      new Date(Date.now() - CLAIM_LEASE_MS),
+    );
+    if (claim === 'duplicate') {
       duplicatesSkipped.inc({ channel });
       this.logger.log(`${channel} already delivered — skipping duplicate`);
       return 'skipped';
+    }
+    if (claim === 'in_flight') {
+      throw new DeliveryInFlightError(channel);
     }
 
     // Times the channel call only — the history write below is our own DB and
@@ -76,50 +103,15 @@ export class NotifierService {
       await sender.send(event);
     } catch (err) {
       endTimer({ outcome: 'failure' });
+      // This attempt is over, so hand the claim back: the retry that follows is
+      // the same delivery continuing, not a second consumer, and must not have
+      // to outwait a lease left behind by its own previous attempt.
+      await this.releaseClaim(channel, event);
       throw err;
     }
     endTimer({ outcome: 'success' });
     await this.settle(channel, event, NotifStatus.SENT);
     return 'sent';
-  }
-
-  /**
-   * Reserve the (event, channel) pair before sending. The unique index is the
-   * arbiter, so two consumers racing on the same redelivery cannot both win.
-   * Returns false when the pair is already SENT.
-   */
-  private async claim(
-    channel: Channel,
-    event: TriggerFiredEvent,
-  ): Promise<boolean> {
-    try {
-      await this.prisma.notification.create({
-        data: this.rowFor(channel, event, NotifStatus.PENDING),
-      });
-      return true;
-    } catch (err) {
-      if (!isUniqueViolation(err)) {
-        throw err;
-      }
-    }
-    // Lost the race or this is a redelivery: an earlier SENT row means done,
-    // anything else (PENDING from a crashed attempt, FAILED from a retry) is
-    // ours to take over.
-    const existing = await this.prisma.notification.findUnique({
-      where: { eventId_channel: { eventId: event.eventId, channel } },
-    });
-    if (existing?.status === NotifStatus.SENT) {
-      return false;
-    }
-    if (existing) {
-      await this.prisma.notification.update({
-        where: { id: existing.id },
-        data: { status: NotifStatus.PENDING, error: null },
-      });
-    }
-    // A vanished row (deleted between the failed create and this read) needs no
-    // claim of its own — settle() upserts it once the send lands.
-    return true;
   }
 
   /** Move the claimed row to its terminal state. */
@@ -129,35 +121,24 @@ export class NotifierService {
     status: NotifStatus,
     error?: string,
   ): Promise<void> {
-    await this.prisma.notification.upsert({
-      where: { eventId_channel: { eventId: event.eventId, channel } },
-      create: this.rowFor(channel, event, status, error),
-      update: { status, error: error ?? null },
-    });
+    await this.deliveries.settle(channel, event, status, error);
     notificationsTotal.inc({ channel, status });
   }
 
-  private rowFor(
+  /**
+   * Best-effort release of a lease we did not deliver under: if the write
+   * fails, the lease expires on its own and the retry waits it out.
+   */
+  private async releaseClaim(
     channel: Channel,
     event: TriggerFiredEvent,
-    status: NotifStatus,
-    error?: string,
-  ): Prisma.NotificationUncheckedCreateInput {
-    return {
-      eventId: event.eventId,
-      triggerId: event.triggerId,
-      userId: event.userId,
-      channel,
-      status,
-      payload: event as unknown as Prisma.InputJsonValue,
-      error: error ?? null,
-    };
+  ): Promise<void> {
+    try {
+      await this.deliveries.releaseClaim(channel, event.eventId);
+    } catch (err) {
+      this.logger.warn(
+        `Could not release the ${channel} claim: ${String(err)}`,
+      );
+    }
   }
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof Prisma.PrismaClientKnownRequestError &&
-    err.code === UNIQUE_VIOLATION
-  );
 }
