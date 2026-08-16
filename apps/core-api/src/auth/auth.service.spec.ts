@@ -139,6 +139,24 @@ describe('AuthService', () => {
       expect(await bcrypt.compare('Passw0rd!', passwordHash)).toBe(true);
     });
 
+    it('stores only a fingerprint of the verification token, and mails the token', async () => {
+      await service.register({
+        email: 'user@example.com',
+        password: 'Passw0rd!',
+      });
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: { emailVerificationTokenHash: string } },
+      ];
+      const [{ html }] = mail.send.mock.calls[0] as [{ html: string }];
+      // The link is the only copy of the token that can verify the address;
+      // the row holds a value a dump cannot turn back into one.
+      const token = /token=([0-9a-f-]+)/.exec(html)?.[1];
+      expect(token).toBeTruthy();
+      expect(data.emailVerificationTokenHash).toBe(sha256(token!));
+      expect(data.emailVerificationTokenHash).not.toBe(token);
+    });
+
     it('still issues tokens when the mailer is down — verification is a soft gate', async () => {
       mail.send.mockRejectedValue(new Error('smtp unreachable'));
 
@@ -456,9 +474,20 @@ describe('AuthService', () => {
         where: { id: 'u1' },
         data: {
           emailVerified: true,
-          emailVerificationToken: null,
+          emailVerificationTokenHash: null,
           emailVerificationTokenExpiresAt: null,
         },
+      });
+    });
+
+    it('looks the token up by its fingerprint, never by the token itself', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.verifyEmail('good')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { emailVerificationTokenHash: sha256('good') },
       });
     });
   });

@@ -74,7 +74,7 @@ export class AuthService {
   /** Confirm an email-verification token (idempotent for unknown tokens). */
   async verifyEmail(token: string): Promise<{ verified: boolean }> {
     const user = await this.prisma.user.findUnique({
-      where: { emailVerificationToken: token },
+      where: { emailVerificationTokenHash: hashToken(token) },
     });
     if (
       !user ||
@@ -87,7 +87,7 @@ export class AuthService {
       where: { id: user.id },
       data: {
         emailVerified: true,
-        emailVerificationToken: null,
+        emailVerificationTokenHash: null,
         emailVerificationTokenExpiresAt: null,
       },
     });
@@ -111,11 +111,13 @@ export class AuthService {
     userId: string,
     email: string,
   ): Promise<void> {
+    // The link carries the token; the row keeps only its fingerprint, so the
+    // one copy that can verify an address lives in the user's inbox.
     const token = randomUUID();
     await this.prisma.user.update({
       where: { id: userId },
       data: {
-        emailVerificationToken: token,
+        emailVerificationTokenHash: hashToken(token),
         emailVerificationTokenExpiresAt: new Date(Date.now() + VERIFY_TTL_MS),
       },
     });
