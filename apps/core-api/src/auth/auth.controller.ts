@@ -92,6 +92,10 @@ export class AuthController {
 
   @Post('logout')
   @HttpCode(HttpStatus.OK)
+  // Unauthenticated like refresh — it takes the cookie, not a bearer token —
+  // and it verifies a JWT and writes to the database on every call. The only
+  // route in this controller that was left on the global bucket alone.
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @ApiOkResponse({ type: SuccessResultDto })
   async logout(
     @Req() req: Request,
