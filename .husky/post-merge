@@ -1,0 +1,9 @@
+#!/bin/sh
+# The generated Prisma client is not committed, so a pull that brings a schema
+# change leaves it describing the previous schema — `tsc` then fails on fields
+# that exist in the database but not in the types. `postinstall` only covers a
+# fresh install, which a pull is not.
+if git diff --name-only HEAD@{1} HEAD 2>/dev/null | grep -q '^prisma/schema.prisma$'; then
+  echo "prisma/schema.prisma changed — regenerating the client"
+  npx prisma generate
+fi
