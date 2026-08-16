@@ -20,6 +20,10 @@ import { RefreshPayload, Tokens } from './types';
 
 const BCRYPT_ROUNDS = 12;
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+// Far shorter than the 24 hours a verification link gets: this one takes the
+// account over rather than clearing a soft gate, so the window in which a
+// leaked inbox is worth an attacker's time should be small.
+const RESET_TTL_MS = 60 * 60 * 1000;
 const PRUNE_LOCK_KEY = 'core-api:refresh-tokens:prune';
 const PRUNE_LOCK_TTL_SEC = 300;
 
@@ -105,6 +109,98 @@ export class AuthService {
     }
     await this.sendVerificationEmail(user.id, user.email);
     return { sent: true };
+  }
+
+  /**
+   * Begin a password reset. Answers the same way for a known and an unknown
+   * address: the route is unauthenticated, so anything that varied with the
+   * account's existence — status, body, or a materially different response
+   * time — would make it an enumeration oracle. The work for an unknown address
+   * is a lookup either way, and the throttler bounds the rest.
+   */
+  async forgotPassword(email: string): Promise<{ accepted: boolean }> {
+    const user = await this.users.findByEmail(email);
+    if (!user) {
+      this.logger.log('Password reset requested for an unknown address');
+      return { accepted: true };
+    }
+    // The link carries the token; the row keeps only its fingerprint, so the
+    // one copy that can take the account over lives in the user's inbox.
+    const token = randomUUID();
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordResetTokenHash: hashToken(token),
+        passwordResetTokenExpiresAt: new Date(Date.now() + RESET_TTL_MS),
+      },
+    });
+    const link = `${this.frontUrl}/reset-password?token=${token}`;
+    if (!this.mail.configured) {
+      // Dev fallback, matching the verification path: surface the link in logs
+      // when no mailer is configured.
+      this.logger.warn(`Mailer disabled; reset link for ${email}: ${link}`);
+      return { accepted: true };
+    }
+    try {
+      await this.mail.send({
+        to: email,
+        subject: 'Reset your password',
+        html:
+          `<p>Reset your password by clicking <a href="${link}">this link</a>. It expires in one hour.</p>` +
+          `<p>If you did not ask for this, ignore this email — your password has not changed.</p>`,
+      });
+    } catch (err) {
+      // The caller is told nothing either way, so a mailer failure must at
+      // least be visible here.
+      this.logger.error(
+        `Failed to send password reset email to ${email}: ${String(err)}`,
+      );
+    }
+    return { accepted: true };
+  }
+
+  /**
+   * Complete a password reset. Consumes the token, replaces the hash and
+   * revokes every refresh token the user holds — a reset is what someone locked
+   * out of their account does, so any session still running is as likely to be
+   * whoever locked them out.
+   */
+  async resetPassword(
+    token: string,
+    password: string,
+  ): Promise<{ reset: boolean }> {
+    const user = await this.prisma.user.findUnique({
+      where: { passwordResetTokenHash: hashToken(token) },
+    });
+    if (
+      !user ||
+      !user.passwordResetTokenExpiresAt ||
+      user.passwordResetTokenExpiresAt < new Date()
+    ) {
+      throw new BadRequestException('Invalid or expired reset token');
+    }
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash,
+          passwordResetTokenHash: null,
+          passwordResetTokenExpiresAt: null,
+          // Following the link proves control of the inbox, which is the same
+          // thing the verification link proves. Leaving the account unverified
+          // here would ask the user to prove it twice with one mail round-trip.
+          emailVerified: true,
+        },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId: user.id, revoked: false },
+        data: { revoked: true },
+      }),
+    ]);
+    this.metrics.recordAuth('password_reset');
+    this.logger.log(`Password reset completed for user ${user.id}`);
+    return { reset: true };
   }
 
   private async sendVerificationEmail(

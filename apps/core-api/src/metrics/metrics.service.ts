@@ -2,7 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { Counter, Histogram } from 'prom-client';
 import { getCounter, getHistogram, metricsRegistry } from '@app/common';
 
-export type AuthEvent = 'register' | 'login' | 'refresh';
+export type AuthEvent =
+  | 'register'
+  | 'login'
+  | 'refresh'
+  | 'password_reset'
+  | 'account_deleted';
 
 @Injectable()
 export class MetricsService {

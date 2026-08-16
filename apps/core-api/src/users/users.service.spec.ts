@@ -1,6 +1,11 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
+import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
 import { UsersService } from './users.service';
 import { CreatePushSubscriptionDto } from './dto/push-subscription.dto';
@@ -13,6 +18,8 @@ type PrismaMock = {
     findUnique: jest.Mock;
     create: jest.Mock;
     update: jest.Mock;
+    count: jest.Mock;
+    delete: jest.Mock;
   };
   pushSubscription: {
     findUnique: jest.Mock;
@@ -37,6 +44,8 @@ describe('UsersService', () => {
         findUnique: jest.fn(),
         create: jest.fn(),
         update: jest.fn().mockResolvedValue({}),
+        count: jest.fn().mockResolvedValue(2),
+        delete: jest.fn().mockResolvedValue({}),
       },
       pushSubscription: {
         findUnique: jest.fn(),
@@ -165,6 +174,62 @@ describe('UsersService', () => {
       expect(prisma.pushSubscription.deleteMany).toHaveBeenCalledWith({
         where: { userId: 'u1', endpoint: pushDto.endpoint },
       });
+    });
+  });
+
+  describe('deleteAccount', () => {
+    const withPassword = async (role = 'USER') => ({
+      id: 'u1',
+      role,
+      passwordHash: await bcrypt.hash('Passw0rd!', 4),
+    });
+
+    it('rejects a user that no longer exists', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.deleteAccount('u1', 'Passw0rd!'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses a wrong password, so a leaked token cannot erase the account', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword());
+
+      await expect(
+        service.deleteAccount('u1', 'not-the-password'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(prisma.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes the row once the password checks out', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword());
+
+      await expect(service.deleteAccount('u1', 'Passw0rd!')).resolves.toEqual({
+        success: true,
+      });
+      // Everything the user owns cascades at the database, so one delete is
+      // the whole operation.
+      expect(prisma.user.delete).toHaveBeenCalledWith({ where: { id: 'u1' } });
+    });
+
+    it('refuses to remove the last admin', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword('ADMIN'));
+      prisma.user.count.mockResolvedValue(1);
+
+      await expect(
+        service.deleteAccount('u1', 'Passw0rd!'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('lets an admin go when another one remains', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword('ADMIN'));
+      prisma.user.count.mockResolvedValue(2);
+
+      await expect(service.deleteAccount('u1', 'Passw0rd!')).resolves.toEqual({
+        success: true,
+      });
+      expect(prisma.user.delete).toHaveBeenCalled();
     });
   });
 });

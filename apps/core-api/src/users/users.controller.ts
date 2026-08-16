@@ -5,9 +5,12 @@ import {
   Get,
   Patch,
   Post,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Throttle } from '@nestjs/throttler';
+import type { Response } from 'express';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -20,6 +23,7 @@ import {
   DeletePushSubscriptionDto,
 } from './dto/push-subscription.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
 import {
   ProfileResponseDto,
   PushSubscriptionResponseDto,
@@ -27,6 +31,7 @@ import {
 } from './dto/profile-response.dto';
 import { SuccessResultDto } from '../common/dto/operation-result.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { REFRESH_COOKIE, refreshCookieOptions } from '../auth/refresh-cookie';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthUser } from '../auth/types';
 
@@ -50,6 +55,24 @@ export class UsersController {
   @ApiOkResponse({ type: ProfileResponseDto })
   updateMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateProfileDto) {
     return this.users.updateProfile(user.userId, dto);
+  }
+
+  @Delete('me')
+  // Irreversible and password-checked, so the bucket is tight: a loose one
+  // would leave the password confirmation open to being guessed at.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ApiOkResponse({ type: SuccessResultDto })
+  async deleteMe(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: DeleteAccountDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<SuccessResultDto> {
+    const result = await this.users.deleteAccount(user.userId, dto.password);
+    // The refresh cookie outlives the row it points at, and its path scopes it
+    // to /auth — clearing it needs the same attributes it was set with, not the
+    // path this route happens to live on.
+    res.clearCookie(REFRESH_COOKIE, refreshCookieOptions(this.config));
+    return result;
   }
 
   @Post('me/telegram-link')

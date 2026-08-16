@@ -2,8 +2,10 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
+import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '@app/database';
 import { User } from '@prisma/client';
 import {
@@ -161,6 +163,40 @@ export class UsersService {
     await this.prisma.pushSubscription.deleteMany({
       where: { userId, endpoint: dto.endpoint },
     });
+    return { success: true };
+  }
+
+  /**
+   * Erase the account and everything it owns. Triggers, conditions, pinned
+   * cities, push subscriptions, notification history and sessions all cascade
+   * at the database, so this is one delete rather than a sequence that could
+   * half-finish.
+   *
+   * The password is re-checked here because the access token alone is not
+   * enough authority for something irreversible.
+   */
+  async deleteAccount(
+    userId: string,
+    password: string,
+  ): Promise<{ success: boolean }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (!(await bcrypt.compare(password, user.passwordHash))) {
+      throw new UnauthorizedException('Incorrect password');
+    }
+    if (user.role === 'ADMIN') {
+      const admins = await this.prisma.user.count({ where: { role: 'ADMIN' } });
+      // Locking everyone out of the admin surface is not a thing a user should
+      // be able to do to the deployment by tidying up their own account.
+      if (admins === 1) {
+        throw new ForbiddenException(
+          'You are the only admin — promote another account first',
+        );
+      }
+    }
+    await this.prisma.user.delete({ where: { id: userId } });
     return { success: true };
   }
 }

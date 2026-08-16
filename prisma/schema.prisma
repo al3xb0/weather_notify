@@ -73,6 +73,12 @@ model User {
   /// hand anyone a working confirmation for an address they do not own.
   emailVerificationTokenHash      String?            @unique
   emailVerificationTokenExpiresAt DateTime?
+  /// SHA-256 of the password-reset token, never the token itself — same
+  /// reasoning as [emailVerificationTokenHash], and the stakes are higher: this
+  /// one takes over the account outright, so a database dump must not contain a
+  /// usable reset for any address.
+  passwordResetTokenHash          String?            @unique
+  passwordResetTokenExpiresAt     DateTime?
   triggers                        Trigger[]
   pushSubs                        PushSubscription[]
   notifications                   Notification[]

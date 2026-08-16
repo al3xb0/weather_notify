@@ -34,6 +34,7 @@ type PrismaMock = {
     updateMany: jest.Mock;
     deleteMany: jest.Mock;
   };
+  $transaction: jest.Mock;
 };
 
 describe('AuthService', () => {
@@ -59,6 +60,11 @@ describe('AuthService', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
+      // The calls are already promises by the time they reach here, so awaiting
+      // the array is enough to model the batch.
+      $transaction: jest
+        .fn()
+        .mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops)),
     };
     users = {
       findByEmail: jest.fn().mockResolvedValue(null),
@@ -489,6 +495,140 @@ describe('AuthService', () => {
       expect(prisma.user.findUnique).toHaveBeenCalledWith({
         where: { emailVerificationTokenHash: sha256('good') },
       });
+    });
+  });
+
+  describe('forgotPassword', () => {
+    it('answers the same for an unknown address as for a known one', async () => {
+      users.findByEmail.mockResolvedValue(null);
+
+      await expect(
+        service.forgotPassword('nobody@example.com'),
+      ).resolves.toEqual({ accepted: true });
+      // No row written and no mail sent — the only thing that must not differ
+      // is what the caller can observe.
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(mail.send).not.toHaveBeenCalled();
+    });
+
+    it('stores the fingerprint and mails the token itself', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+
+      await service.forgotPassword('user@example.com');
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: { passwordResetTokenHash: string } },
+      ];
+      const [{ html }] = mail.send.mock.calls[0] as [{ html: string }];
+      const token = /reset-password\?token=([\w-]+)/.exec(html)?.[1];
+      expect(token).toBeDefined();
+      expect(data.passwordResetTokenHash).toBe(sha256(token!));
+      expect(html).not.toContain(data.passwordResetTokenHash);
+    });
+
+    it('expires the token in an hour, not in a day like verification', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+
+      await service.forgotPassword('user@example.com');
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: { passwordResetTokenExpiresAt: Date } },
+      ];
+      const ttlMs = data.passwordResetTokenExpiresAt.getTime() - Date.now();
+      expect(ttlMs).toBeGreaterThan(59 * 60_000);
+      expect(ttlMs).toBeLessThanOrEqual(60 * 60_000);
+    });
+
+    it('still accepts when the mailer throws, so the caller learns nothing', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+      mail.send.mockRejectedValue(new Error('smtp down'));
+
+      await expect(service.forgotPassword('user@example.com')).resolves.toEqual(
+        { accepted: true },
+      );
+    });
+  });
+
+  describe('resetPassword', () => {
+    it('rejects an unknown token', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.resetPassword('nope', 'N3w-Passw0rd!'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects an expired token without touching the password', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u1',
+        passwordResetTokenExpiresAt: new Date(Date.now() - 1),
+      });
+
+      await expect(
+        service.resetPassword('stale', 'N3w-Passw0rd!'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('looks the token up by its fingerprint, never by the token itself', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.resetPassword('good', 'N3w-Passw0rd!'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { passwordResetTokenHash: sha256('good') },
+      });
+    });
+
+    it('stores a bcrypt hash, burns the token and verifies the address', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u1',
+        passwordResetTokenExpiresAt: new Date(Date.now() + 60_000),
+      });
+
+      await expect(
+        service.resetPassword('good', 'N3w-Passw0rd!'),
+      ).resolves.toEqual({ reset: true });
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: Record<string, unknown> },
+      ];
+      expect(data.passwordHash).not.toContain('N3w-Passw0rd!');
+      expect(
+        await bcrypt.compare('N3w-Passw0rd!', data.passwordHash as string),
+      ).toBe(true);
+      expect(data.passwordResetTokenHash).toBeNull();
+      expect(data.passwordResetTokenExpiresAt).toBeNull();
+      // Following the link proved control of the inbox, which is the same
+      // thing the verification link proves.
+      expect(data.emailVerified).toBe(true);
+    });
+
+    it('revokes every live session, since a reset is what a locked-out user does', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u1',
+        passwordResetTokenExpiresAt: new Date(Date.now() + 60_000),
+      });
+
+      await service.resetPassword('good', 'N3w-Passw0rd!');
+
+      expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', revoked: false },
+        data: { revoked: true },
+      });
+      // Both writes go in one transaction: a password changed without the
+      // sessions dying would leave the attacker signed in.
+      expect(prisma.$transaction).toHaveBeenCalled();
     });
   });
 
