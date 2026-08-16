@@ -43,7 +43,7 @@ describe('failure path: a failing channel climbs the ladder and parks', () => {
   ): void {
     store = new InMemoryNotifications();
     const notifier = new NotifierService(
-      store as never,
+      store,
       new Map<'EMAIL', NotificationChannel>([
         ['EMAIL', { channel: 'EMAIL', send }],
       ]),

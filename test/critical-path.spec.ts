@@ -99,10 +99,7 @@ describe('critical path: threshold crossed → notification delivered', () => {
         return Promise.resolve();
       },
     };
-    notifier = new NotifierService(
-      store as never,
-      new Map([['EMAIL', emailChannel]]),
-    );
+    notifier = new NotifierService(store, new Map([['EMAIL', emailChannel]]));
     consumer = new RabbitConsumerService(
       { get: jest.fn(), getOrThrow: jest.fn() } as never,
       notifier,
