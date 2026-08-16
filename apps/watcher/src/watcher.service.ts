@@ -65,6 +65,10 @@ export class WatcherService {
     private readonly redis: RedisService,
   ) {}
 
+  // Read from the environment rather than ConfigService because a decorator is
+  // evaluated when the class is loaded, before any provider exists. The value
+  // is not unvalidated for it: `watcherEnvSchema` rejects a malformed
+  // expression at boot, where the message names the variable.
   @Cron(process.env.WATCHER_CRON || CronExpression.EVERY_5_MINUTES, {
     name: 'weather-poll',
   })

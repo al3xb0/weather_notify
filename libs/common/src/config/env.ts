@@ -29,10 +29,24 @@ export const coreApiEnvSchema = z.object({
   JWT_REFRESH_SECRET: jwtSecret,
 });
 
+/**
+ * A cron expression as `@nestjs/schedule` accepts it: five fields, or six with
+ * seconds in front. Validated here because the schedule is applied by a
+ * decorator, which runs before any of this and reports a bad expression as a
+ * parser error from inside the scheduler.
+ */
+const cronExpression = z
+  .string()
+  .regex(
+    /^(\S+\s+){4,5}\S+$/,
+    'must be a cron expression of 5 fields, or 6 with seconds',
+  );
+
 export const watcherEnvSchema = z.object({
   ...base,
   REDIS_URL: required('REDIS_URL'),
   RABBITMQ_URL: required('RABBITMQ_URL'),
+  WATCHER_CRON: cronExpression.optional(),
 });
 
 export const notifierEnvSchema = z.object({

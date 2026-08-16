@@ -52,6 +52,34 @@ describe('env schemas', () => {
     });
   });
 
+  describe('watcherEnvSchema', () => {
+    const watcherEnv = {
+      DATABASE_URL: coreApiEnv.DATABASE_URL,
+      REDIS_URL: coreApiEnv.REDIS_URL,
+      RABBITMQ_URL: coreApiEnv.RABBITMQ_URL,
+    };
+
+    it('accepts an absent schedule and falls back in the decorator', () => {
+      expect(watcherEnvSchema.safeParse(watcherEnv).success).toBe(true);
+    });
+
+    it.each(['0 */5 * * * *', '*/5 * * * *'])('accepts %s', (cron) => {
+      expect(
+        watcherEnvSchema.safeParse({ ...watcherEnv, WATCHER_CRON: cron })
+          .success,
+      ).toBe(true);
+    });
+
+    // The schedule is applied by a decorator, so an invalid expression would
+    // otherwise surface as a parser error from inside the scheduler.
+    it.each(['every 5 minutes', '*/5', ''])('rejects %p', (cron) => {
+      expect(
+        watcherEnvSchema.safeParse({ ...watcherEnv, WATCHER_CRON: cron })
+          .success,
+      ).toBe(false);
+    });
+  });
+
   it('watcher and notifier require the broker', () => {
     expect(
       watcherEnvSchema.safeParse({
