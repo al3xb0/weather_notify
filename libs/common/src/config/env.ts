@@ -56,7 +56,14 @@ export const watcherEnvSchema = z
     WATCHER_CRON: cronExpression.optional(),
     WATCHER_SHARD_COUNT: nonNegativeInt.optional(),
     WATCHER_SHARD_INDEX: nonNegativeInt.optional(),
+    WATCHER_CONCURRENCY: nonNegativeInt.optional(),
   })
+  .refine(
+    (env) => (env.WATCHER_CONCURRENCY ?? 1) > 0,
+    // Zero would be a cycle that starts no workers and polls nothing, which
+    // looks exactly like a system with no triggers.
+    'WATCHER_CONCURRENCY must be at least 1',
+  )
   .refine(
     (env) => (env.WATCHER_SHARD_COUNT ?? 1) > 0,
     'WATCHER_SHARD_COUNT must be at least 1',

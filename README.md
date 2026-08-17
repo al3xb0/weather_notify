@@ -533,14 +533,20 @@ once, is elected through a renewed Redis lock, so extra replicas stand by and
 take over within the lock's TTL if the poller stops. A webhook would remove the
 election entirely, at the cost of a publicly reachable HTTPS endpoint.
 
-**Open-Meteo is polled per location, sequentially.** Locations are deduplicated
+**Open-Meteo is polled a few locations at a time.** Locations are deduplicated
 (triggers rounded to two decimals share one call) and cached in Redis for four
 minutes, so the current cost is low. The TTL is deliberately under the poll
 interval: a longer-lived entry is handed back to the next cycle, which then
 re-evaluates data the previous one already acted upon — writes and wall time
-spent on a decision that cannot come out differently. Open-Meteo accepts batched
-coordinates, which is where this goes if the location count grows faster than
-the cache absorbs it.
+spent on a decision that cannot come out differently.
+
+`WATCHER_CONCURRENCY` (default 5) bounds how many are in flight. A location is
+one request and the writes behind it, which is almost entirely waiting, so a
+strictly serial pass costs the sum of every round-trip and overruns a five-minute
+tick at a few hundred locations — well before the trigger count is interesting.
+The cap is what keeps the alternative from being a burst at an upstream we do not
+control. Open-Meteo also accepts batched coordinates, which is where this goes if
+the location count grows faster than the cache and the pool absorb it.
 
 **The UI's own Open-Meteo calls go through the API.** City search and the
 weather page used to call Open-Meteo from the browser, which made a third
