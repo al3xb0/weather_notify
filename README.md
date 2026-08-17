@@ -84,6 +84,8 @@ Decisions worth arguing about, with what each one **gave up**, live in
 | [0007](docs/adr/0007-transactional-outbox.md) | The watcher never publishes directly | A crash between publish and record fires a second, unrecognisable event |
 | [0008](docs/adr/0008-openapi-as-the-client-contract.md) | A committed OpenAPI document | A shared package's guarantee without a registry |
 | [0009](docs/adr/0009-proxying-the-upstream.md) | The browser talks to one origin | A third party's uptime should not be a visible feature's uptime |
+| [0010](docs/adr/0010-sharding-the-watcher.md) | The watcher shards by location | Instances agree without talking to each other |
+| [0011](docs/adr/0011-denying-tokens-for-a-deleted-account.md) | A deny marker for deleted accounts | A stateless token cannot know its account is gone |
 
 ## Using this as a starting point
 
@@ -108,8 +110,11 @@ stays. MIT licensed — see [CONTRIBUTING.md](CONTRIBUTING.md) to work on it and
   `(eventId, channel)` claim.
 - **Staged retry + a real dead-letter queue** with the reason recorded on the message.
 - **Email verification** (soft gate) and **Telegram deep-link binding** via long-polling bot.
-- **Prometheus metrics** on a separate, unpublished port; structured logging via pino with
-  per-delivery correlation.
+- **Prometheus metrics** on a separate, unpublished port, scraped by the stack itself,
+  with alert rules routed to a person through Alertmanager; structured logging via pino
+  with per-delivery correlation.
+- **Scheduled backups** that verify the archive and a restore CI actually performs.
+- **Horizontal scale for the poller** — shard by a hash of the location, no coordination.
 - **Generated client contract** — `openapi.json` is committed and CI fails if it drifts.
 
 ## Security
@@ -117,6 +122,12 @@ stays. MIT licensed — see [CONTRIBUTING.md](CONTRIBUTING.md) to work on it and
 - **Auth** — bcrypt (cost 12) password hashing; short-lived access JWT + rotating refresh
   token stored **hashed** in the DB. Refresh rotation includes **reuse detection**: replaying
   an already-rotated token revokes the user's entire token family.
+- **Deleting an account stops its tokens.** An access token is stateless and valid for its
+  full lifetime, so deletion — by the user or by an admin — writes a deny marker for that
+  window; a demotion does the same, since the role rides in the token
+  ([ADR 0011](docs/adr/0011-denying-tokens-for-a-deleted-account.md)).
+- **Password reset** consumes a fingerprinted, one-hour token and revokes every session in
+  the same transaction as the password write.
 - **Refresh token transport** — delivered in an `httpOnly`, `SameSite`, path-scoped cookie
   (never exposed to JS); `Secure` in production.
 - **Hardening** — `helmet`, explicit CORS allow-list (no wildcard reflection), global +

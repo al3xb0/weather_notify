@@ -18,6 +18,8 @@ that is fine; the record is here so you know what you are trading away.
 | [0007](0007-transactional-outbox.md) | The watcher never publishes directly | A crash between publish and record fires a second, unrecognisable event |
 | [0008](0008-openapi-as-the-client-contract.md) | A committed OpenAPI document | The same guarantee as a shared package, with no registry |
 | [0009](0009-proxying-the-upstream.md) | The browser talks to one origin | A third party's uptime should not be a visible feature's uptime |
+| [0010](0010-sharding-the-watcher.md) | The watcher shards by location | Instances agree without talking to each other |
+| [0011](0011-denying-tokens-for-a-deleted-account.md) | A deny marker for deleted accounts | A stateless token cannot know its account is gone |
 
 ## Format
 

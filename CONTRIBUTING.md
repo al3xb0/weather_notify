@@ -52,6 +52,10 @@ scraping. It needs Docker, so it is usually easier to let CI run it.
 - **New behaviour comes with the test that would have caught its absence.** The
   coverage gate is set just under the current numbers, so it ratchets — a drop
   fails the build.
+- **Anything that ends a session must deny the tokens already issued.** Access
+  tokens are stateless and live for their full TTL, so deleting or demoting a
+  user without a deny marker leaves them authenticated against rows that may no
+  longer exist.
 
 ## Commits
 

@@ -19,11 +19,13 @@ Everything in this list is domain-agnostic and needs no changes:
 - **The outbox** — a signal that fired is never lost and never fires twice
   under a new id ([ADR 0007])
 - **Auth** — registration, login, rotating refresh tokens with reuse detection,
-  email verification, password reset, account deletion
+  email verification, password reset, account deletion, and a deny marker so a
+  deleted account's stateless tokens stop working immediately ([ADR 0011])
 - **Anti-spam** — the `ARMED` → `FIRED` state machine, per-trigger cooldown,
   hysteresis, per-user timezone-aware quiet hours
-- **Operations** — health/readiness, Prometheus metrics with alert rules,
-  Grafana dashboards, scheduled database backups with a tested restore
+- **Operations** — health/readiness, Prometheus metrics with alert rules that
+  route through Alertmanager, Grafana dashboards, scheduled database backups
+  with a tested restore, and horizontal scale for the poller via sharding
 - **The contract** — a committed OpenAPI document and generated client types,
   checked at both ends ([ADR 0008])
 
@@ -116,16 +118,22 @@ channels get this right, which is why `channels.spec.ts` tests exactly that.
 
 So you can decide whether to build it rather than discover it missing:
 
-- **No Alertmanager.** Prometheus evaluates the rules; nothing routes them to a
-  person. Adding a receiver is a config file.
-- **No horizontal scale for the watcher.** One instance, serialised by a Redis
-  lock. Sharding by a hash of the subject is the natural next step, since
-  triggers are already grouped by location.
 - **No billing, no organisations.** Users are individuals, and limits are
-  constants in `apps/core-api/src/meta/limits.ts` served over `GET /meta`.
-- **No i18n.** English strings inline.
+  constants in `apps/core-api/src/meta/limits.ts` served over `GET /meta`. This
+  is the largest gap between the project and a commercial product.
+- **No rebalancing for the watcher's shards.** Changing the shard count
+  reassigns most locations at once, so the instances have to restart together
+  ([ADR 0010]). Consistent hashing is what removes that.
+- **One alerting channel.** Alertmanager routes to a webhook or to email — and
+  email is the same path the notifier depends on, so an SMTP outage swallows
+  the alert about itself. A second, independent channel is the standard answer.
+- **No infrastructure-as-code, no zero-downtime deploy.** `docker compose up -d`
+  on one machine; recreating a container is a short outage.
 - **One deployment, one database.** Three services, but not independently
   scalable — see [ADR 0001] for why the split exists at all.
+
+The frontend adds a light theme and English/Russian, both without a library —
+see its README if you want the shape of either.
 
 [ADR 0001]: adr/0001-microservices-and-a-broker.md
 [ADR 0002]: adr/0002-domain-purity-not-clean-architecture.md
@@ -134,3 +142,5 @@ So you can decide whether to build it rather than discover it missing:
 [0006]: adr/0006-idempotency-claim-as-a-lease.md
 [ADR 0007]: adr/0007-transactional-outbox.md
 [ADR 0008]: adr/0008-openapi-as-the-client-contract.md
+[ADR 0010]: adr/0010-sharding-the-watcher.md
+[ADR 0011]: adr/0011-denying-tokens-for-a-deleted-account.md
