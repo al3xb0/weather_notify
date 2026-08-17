@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
@@ -9,13 +9,40 @@ const RELEASE_IF_OWNED =
 const EXTEND_IF_OWNED =
   "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end";
 
+/**
+ * How long a single command may wait before it is treated as a failure.
+ *
+ * Without it a command has no deadline at all: ioredis parks it in the offline
+ * queue while the connection is down and resolves it whenever Redis comes
+ * back. Every caller in this service that documents a fallback — the throttler
+ * storage, the revocation check — depends on being *told* that Redis is
+ * unreachable, and a promise that never settles never tells anyone. With the
+ * global throttler guard reaching Redis on every request, that turned a Redis
+ * outage into an API that stops answering rather than one that degrades.
+ */
+const COMMAND_TIMEOUT_MS = 1_000;
+
 @Injectable()
 export class RedisService implements OnModuleDestroy {
+  private readonly logger = new Logger(RedisService.name);
   readonly client: Redis;
 
   constructor(config: ConfigService) {
     this.client = new Redis(config.getOrThrow<string>('REDIS_URL'), {
-      maxRetriesPerRequest: null,
+      // Bounded rather than unlimited: a command that has already waited out
+      // its timeout is not made more useful by retrying it forever.
+      maxRetriesPerRequest: 1,
+      commandTimeout: COMMAND_TIMEOUT_MS,
+      // The offline queue stays on for the opposite case: at boot the socket is
+      // still being established, and the first commands should wait for it
+      // rather than fail. The timeout above is what bounds that wait.
+      enableOfflineQueue: true,
+    });
+    // ioredis emits `error` on every failed reconnect attempt. Without a
+    // listener Node treats it as an unhandled `error` event and exits, so an
+    // outage would take the process down instead of degrading it.
+    this.client.on('error', (err: Error) => {
+      this.logger.warn(`Redis connection error: ${err.message}`);
     });
   }
 
@@ -79,9 +106,23 @@ export class RedisService implements OnModuleDestroy {
    * token and a valid one has to be visible somewhere. The TTL should be the
    * access-token lifetime: after that the token expires on its own and the key
    * is dead weight.
+   *
+   * Never throws. The state change this accompanies — a deletion, a demotion —
+   * has already committed by the time it is called, so a failure here must not
+   * turn a request that succeeded into a 500. It is not silent either: the
+   * return value says whether the denial landed, and a failure is logged at
+   * error level because the account keeps its access until the token expires.
    */
-  async revokeUserTokens(userId: string, ttlSec: number): Promise<void> {
-    await this.client.set(revokedKey(userId), '1', 'EX', ttlSec);
+  async revokeUserTokens(userId: string, ttlSec: number): Promise<boolean> {
+    try {
+      await this.client.set(revokedKey(userId), '1', 'EX', ttlSec);
+      return true;
+    } catch (err) {
+      this.logger.error(
+        `Could not deny outstanding tokens for user ${userId}; they stay valid for up to ${ttlSec}s: ${String(err)}`,
+      );
+      return false;
+    }
   }
 
   /**
@@ -90,6 +131,10 @@ export class RedisService implements OnModuleDestroy {
    * request in the system. The window it leaves is bounded by the access
    * token's own lifetime, which is the same window that exists without this
    * mechanism at all — so a Redis outage costs the improvement, not the API.
+   *
+   * That only holds because commands have a deadline (`COMMAND_TIMEOUT_MS`).
+   * An unbounded command does not reject on an outage, it waits — and a `catch`
+   * that is never reached is not a fallback.
    */
   async isUserRevoked(userId: string): Promise<boolean> {
     try {

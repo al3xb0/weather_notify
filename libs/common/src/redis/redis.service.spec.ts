@@ -3,7 +3,9 @@ const mockRedis = {
   set: jest.fn(),
   ttl: jest.fn(),
   del: jest.fn(),
+  exists: jest.fn(),
   eval: jest.fn(),
+  on: jest.fn(),
   disconnect: jest.fn(),
   status: 'ready',
 };
@@ -180,6 +182,39 @@ describe('RedisService', () => {
       await expect(service.extendLock('cycle', 'tok', 120)).resolves.toBe(
         false,
       );
+    });
+  });
+
+  /**
+   * Both halves of the denial list have a documented behaviour on an outage,
+   * and both only hold because commands have a deadline: an unbounded command
+   * does not reject when Redis is gone, it waits, and neither the fallback nor
+   * the error path below would ever run.
+   */
+  describe('token denial', () => {
+    it('bounds how long a command may wait', () => {
+      const Redis = jest.requireMock<{ default: jest.Mock }>('ioredis').default;
+      const [, options] = Redis.mock.calls.at(-1) as [
+        string,
+        { commandTimeout?: number; maxRetriesPerRequest?: number | null },
+      ];
+
+      expect(options.commandTimeout).toBeGreaterThan(0);
+      expect(options.maxRetriesPerRequest).not.toBeNull();
+    });
+
+    it('reports a denial that could not be written rather than throwing', async () => {
+      mockRedis.set.mockRejectedValue(new Error('Command timed out'));
+
+      // The deletion that called this has already committed; a 500 here would
+      // report a failure for work that succeeded.
+      await expect(service.revokeUserTokens('u1', 900)).resolves.toBe(false);
+    });
+
+    it('treats an unreachable Redis as "not revoked"', async () => {
+      mockRedis.exists.mockRejectedValue(new Error('Command timed out'));
+
+      await expect(service.isUserRevoked('u1')).resolves.toBe(false);
     });
   });
 
