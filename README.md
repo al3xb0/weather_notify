@@ -145,8 +145,12 @@ stays. MIT licensed — see [CONTRIBUTING.md](CONTRIBUTING.md) to work on it and
 - **Input validation** — every DTO is validated (class-validator); IANA timezones and
   push endpoints are checked, and user-supplied text is HTML-escaped in outgoing emails.
 - **Fail-fast config** — environment is validated with zod at boot; secrets must be ≥ 32
-  chars and cannot be left as placeholders. Grafana's admin password has no default
-  either: the compose file stops if it is unset.
+  chars and cannot be left as placeholders. `COOKIE_SAMESITE` is an enum, since the value
+  is written into a `Set-Cookie` attribute where a typo is discarded by the browser rather
+  than rejected by anything; `"none"` additionally requires `NODE_ENV=production`, which is
+  what marks the cookie `Secure` — without it the browser drops the cookie and every reload
+  looks like a signed-out user. Grafana's admin password has no default either: the compose
+  file stops if it is unset.
 - **Least privilege** — Docker images run as a non-root user; infra ports bind to loopback.
 
 ## Tech stack

@@ -13,6 +13,7 @@ import {
 } from '@app/common';
 import { PrismaService } from '@app/database';
 import { CoreApiModule } from './core-api.module';
+import { refreshCookieOptions } from './auth/refresh-cookie';
 
 async function bootstrap() {
   // Express catches what happens inside a request; the crons and the Telegram
@@ -21,7 +22,8 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(CoreApiModule, {
     bufferLogs: true,
   });
-  app.useLogger(app.get(Logger));
+  const logger = app.get(Logger);
+  app.useLogger(logger);
   app.enableShutdownHooks();
   const config = app.get(ConfigService);
 
@@ -54,6 +56,20 @@ async function bootstrap() {
     .map((origin) => origin.trim())
     .filter(Boolean);
   app.enableCors({ origin: corsOrigins, credentials: true });
+
+  // The pair that decides whether a frontend on another domain can hold a
+  // session at all: the allow-list is what lets its requests through, and only
+  // `SameSite=none` lets the refresh cookie ride along on them. Both are
+  // deployment-time values, and getting either wrong produces a UI that signs
+  // the user out on every reload with nothing in the log to say why — so the
+  // effective values are stated at boot rather than inferred from a .env
+  // nobody can read from here.
+  const refreshCookie = refreshCookieOptions(config);
+  logger.log(
+    `CORS allow-list: ${corsOrigins.join(', ')} — refresh cookie: ` +
+      `SameSite=${String(refreshCookie.sameSite)}, ` +
+      `Secure=${String(refreshCookie.secure)}, Path=${String(refreshCookie.path)}`,
+  );
 
   // Expose the API explorer everywhere except production, where it would
   // needlessly publish the full surface (and bearer scheme) to the internet.

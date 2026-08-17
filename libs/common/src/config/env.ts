@@ -18,16 +18,37 @@ const base = {
   DATABASE_URL: required('DATABASE_URL'),
 };
 
-export const coreApiEnvSchema = z.object({
-  ...base,
-  REDIS_URL: required('REDIS_URL'),
-  // core-api publishes test notifications through the same broker as the
-  // watcher, so a missing URL is a boot failure — it must surface here rather
-  // than from inside the publisher's onModuleInit.
-  RABBITMQ_URL: required('RABBITMQ_URL'),
-  JWT_ACCESS_SECRET: jwtSecret,
-  JWT_REFRESH_SECRET: jwtSecret,
-});
+/**
+ * `SameSite` for the refresh cookie. An enum rather than a free string because
+ * the value is written straight into a `Set-Cookie` attribute: a typo is not
+ * rejected anywhere downstream, it produces an attribute the browser discards,
+ * and the failure that follows is a session that never restores.
+ */
+const cookieSameSite = z.enum(['lax', 'strict', 'none']);
+
+export const coreApiEnvSchema = z
+  .object({
+    ...base,
+    REDIS_URL: required('REDIS_URL'),
+    // core-api publishes test notifications through the same broker as the
+    // watcher, so a missing URL is a boot failure — it must surface here rather
+    // than from inside the publisher's onModuleInit.
+    RABBITMQ_URL: required('RABBITMQ_URL'),
+    JWT_ACCESS_SECRET: jwtSecret,
+    JWT_REFRESH_SECRET: jwtSecret,
+    // Absent means `lax`, which `refreshCookieOptions` applies. The default
+    // stays there rather than here so one place decides it.
+    COOKIE_SAMESITE: cookieSameSite.optional(),
+  })
+  .refine(
+    (env) => env.COOKIE_SAMESITE !== 'none' || env.NODE_ENV === 'production',
+    // A cross-site frontend needs `none`, and a browser drops a `none` cookie
+    // that is not also `Secure` — which this stack only sets in production.
+    // Caught here because the combination fails silently otherwise: the cookie
+    // is sent, discarded on arrival, and every reload looks like a signed-out
+    // user with nothing in the log to say why.
+    'COOKIE_SAMESITE="none" requires NODE_ENV=production, which is what marks the cookie Secure — without it the browser discards the cookie',
+  );
 
 /**
  * A cron expression as `@nestjs/schedule` accepts it: five fields, or six with

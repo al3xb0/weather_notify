@@ -50,6 +50,49 @@ describe('env schemas', () => {
       });
       expect(result.success).toBe(false);
     });
+
+    describe('COOKIE_SAMESITE', () => {
+      it('accepts an absent value and lets the cookie helper default it', () => {
+        expect(coreApiEnvSchema.safeParse(coreApiEnv).success).toBe(true);
+      });
+
+      it.each(['lax', 'strict'])('accepts %p', (value) => {
+        expect(
+          coreApiEnvSchema.safeParse({ ...coreApiEnv, COOKIE_SAMESITE: value })
+            .success,
+        ).toBe(true);
+      });
+
+      // The value lands in a Set-Cookie attribute, where a browser ignores what
+      // it does not recognise instead of complaining.
+      it.each(['Lax', 'none;', 'true', ''])('rejects %p', (value) => {
+        expect(
+          coreApiEnvSchema.safeParse({ ...coreApiEnv, COOKIE_SAMESITE: value })
+            .success,
+        ).toBe(false);
+      });
+
+      it('accepts "none" in production, where the cookie is Secure', () => {
+        expect(
+          coreApiEnvSchema.safeParse({
+            ...coreApiEnv,
+            COOKIE_SAMESITE: 'none',
+            NODE_ENV: 'production',
+          }).success,
+        ).toBe(true);
+      });
+
+      // Outside production the cookie is not marked Secure, and a `none` cookie
+      // without it is discarded on arrival — a session that never restores.
+      it('rejects "none" outside production and names the variable', () => {
+        const result = coreApiEnvSchema.safeParse({
+          ...coreApiEnv,
+          COOKIE_SAMESITE: 'none',
+        });
+        expect(result.success).toBe(false);
+        expect(result.error?.issues[0].message).toMatch(/COOKIE_SAMESITE/);
+      });
+    });
   });
 
   describe('watcherEnvSchema', () => {
