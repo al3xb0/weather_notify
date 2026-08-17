@@ -197,6 +197,26 @@ describe('AuthService', () => {
       ).rejects.toBeInstanceOf(UnauthorizedException);
     });
 
+    /**
+     * The two rejections above must not be distinguishable by how long they
+     * take, or the route is an account-enumeration oracle.
+     *
+     * The threshold is deliberately far from both sides it separates: skipping
+     * the comparison returns in well under a millisecond, while the bcrypt
+     * verification this now always spends costs hundreds at the configured
+     * work factor. Anything in between means the work happened.
+     */
+    it('spends a password verification even when the address is unknown', async () => {
+      users.findByEmail.mockResolvedValue(null);
+
+      const started = performance.now();
+      await expect(
+        service.login({ email: 'nobody@example.com', password: 'Passw0rd!' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(performance.now() - started).toBeGreaterThan(20);
+    });
+
     it('issues a pair and stores only the token fingerprint', async () => {
       users.findByEmail.mockResolvedValue({
         id: 'u1',

@@ -36,6 +36,16 @@ export class AuthService {
   private readonly refreshSecret: string;
   readonly refreshTtlMs: number;
   private readonly frontUrl: string;
+  /**
+   * A bcrypt hash of a value no password will ever be, computed once at boot
+   * so `login` has something to spend the same work against when the address
+   * is unknown. Random rather than a constant: a fixed hash committed to the
+   * repository is one an attacker can verify a response was measured against.
+   */
+  private readonly absentUserHash = bcrypt.hashSync(
+    randomUUID(),
+    BCRYPT_ROUNDS,
+  );
 
   constructor(
     private readonly prisma: PrismaService,
@@ -240,9 +250,26 @@ export class AuthService {
     }
   }
 
+  /**
+   * Verify credentials in the same time whether or not the address exists.
+   *
+   * Skipping the comparison for an unknown address is the obvious shape and an
+   * enumeration oracle: bcrypt at twelve rounds takes a few hundred
+   * milliseconds, so "no such user" answered in about one, and the difference
+   * is trivially readable over a network. `forgotPassword` is careful about
+   * exactly this; leaving the front door open made that care pointless, since
+   * both routes answer the same question. The comparison runs against a hash
+   * no password can produce, and the result is discarded.
+   */
   async login(dto: LoginDto): Promise<Tokens> {
     const user = await this.users.findByEmail(dto.email);
-    if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
+    // Deliberately not short-circuited: `&&` would skip the compare and
+    // reintroduce the difference this exists to remove.
+    const passwordMatches = await bcrypt.compare(
+      dto.password,
+      user?.passwordHash ?? this.absentUserHash,
+    );
+    if (!user || !passwordMatches) {
       throw new UnauthorizedException('Invalid credentials');
     }
     this.metrics.recordAuth('login');
