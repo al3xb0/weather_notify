@@ -80,6 +80,40 @@
         "tags": [
           "users"
         ]
+      },
+      "delete": {
+        "operationId": "UsersController_deleteMe",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteAccountDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResultDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "users"
+        ]
       }
     },
     "/users/me/telegram-link": {
@@ -382,6 +416,68 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/VerifyEmailResultDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/forgot-password": {
+      "post": {
+        "operationId": "AuthController_forgotPassword",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgotPasswordDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgotPasswordResultDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/reset-password": {
+      "post": {
+        "operationId": "AuthController_resetPassword",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetPasswordResultDto"
                 }
               }
             }
@@ -942,6 +1038,61 @@
         ]
       }
     },
+    "/geocode": {
+      "get": {
+        "operationId": "GeocodeController_search",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GeocodeResultDto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "geocode"
+        ]
+      }
+    },
+    "/weather": {
+      "get": {
+        "operationId": "ForecastController_get",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForecastResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "weather"
+        ]
+      }
+    },
     "/admin/stats": {
       "get": {
         "operationId": "AdminController_stats",
@@ -1287,6 +1438,21 @@
         "type": "object",
         "properties": {}
       },
+      "DeleteAccountDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "SuccessResultDto": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
       "TelegramLinkDto": {
         "type": "object",
         "properties": {
@@ -1302,17 +1468,6 @@
         "required": [
           "url",
           "token"
-        ]
-      },
-      "SuccessResultDto": {
-        "type": "object",
-        "properties": {
-          "success": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success"
         ]
       },
       "PushSubscriptionResponseDto": {
@@ -1403,6 +1558,37 @@
         },
         "required": [
           "verified"
+        ]
+      },
+      "ForgotPasswordDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "ForgotPasswordResultDto": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "description": "Always true — the response is identical for known and unknown addresses"
+          }
+        },
+        "required": [
+          "accepted"
+        ]
+      },
+      "ResetPasswordDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "ResetPasswordResultDto": {
+        "type": "object",
+        "properties": {
+          "reset": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reset"
         ]
       },
       "ResendVerificationResultDto": {
@@ -1790,6 +1976,113 @@
       "CreatePinnedCityDto": {
         "type": "object",
         "properties": {}
+      },
+      "GeocodeResultDto": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "country": {
+            "type": "object",
+            "nullable": true
+          },
+          "admin1": {
+            "type": "object",
+            "nullable": true
+          },
+          "latitude": {
+            "type": "number"
+          },
+          "longitude": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "latitude",
+          "longitude"
+        ]
+      },
+      "CurrentWeatherDto": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "type": "string"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "apparentTemp": {
+            "type": "number"
+          },
+          "humidity": {
+            "type": "number"
+          },
+          "windSpeed": {
+            "type": "number"
+          },
+          "precipitation": {
+            "type": "number"
+          },
+          "weatherCode": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "time",
+          "temperature",
+          "apparentTemp",
+          "humidity",
+          "windSpeed",
+          "precipitation",
+          "weatherCode"
+        ]
+      },
+      "DailyForecastDto": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "weatherCode": {
+            "type": "number"
+          },
+          "tempMax": {
+            "type": "number"
+          },
+          "tempMin": {
+            "type": "number"
+          },
+          "precipitationProbability": {
+            "type": "object",
+            "nullable": true
+          }
+        },
+        "required": [
+          "date",
+          "weatherCode",
+          "tempMax",
+          "tempMin"
+        ]
+      },
+      "ForecastResponseDto": {
+        "type": "object",
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/CurrentWeatherDto"
+          },
+          "daily": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DailyForecastDto"
+            }
+          }
+        },
+        "required": [
+          "current",
+          "daily"
+        ]
       },
       "AdminStatsDto": {
         "type": "object",

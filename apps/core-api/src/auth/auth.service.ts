@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -17,11 +19,28 @@ import { MetricsService } from '../metrics/metrics.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshPayload, Tokens } from './types';
+import { DEFAULT_ACCESS_TTL, parseDurationMs } from './duration';
 
 const BCRYPT_ROUNDS = 12;
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+// Far shorter than the 24 hours a verification link gets: this one takes the
+// account over rather than clearing a soft gate, so the window in which a
+// leaked inbox is worth an attacker's time should be small.
+const RESET_TTL_MS = 60 * 60 * 1000;
 const PRUNE_LOCK_KEY = 'core-api:refresh-tokens:prune';
 const PRUNE_LOCK_TTL_SEC = 300;
+/**
+ * Failed sign-ins one address may accumulate before it stops being tried, and
+ * how long the window lasts.
+ *
+ * Ten is well above what a person mistyping their own password reaches and far
+ * below what a guessing run needs. Fifteen minutes is the cost of being wrong:
+ * short enough that a locked-out owner is not meaningfully inconvenienced,
+ * long enough that waiting it out cuts an attacker's rate to forty guesses an
+ * hour per address.
+ */
+const LOGIN_MAX_FAILURES = 10;
+const LOGIN_LOCKOUT_SEC = 15 * 60;
 
 @Injectable()
 export class AuthService {
@@ -31,6 +50,16 @@ export class AuthService {
   private readonly refreshSecret: string;
   readonly refreshTtlMs: number;
   private readonly frontUrl: string;
+  /**
+   * A bcrypt hash of a value no password will ever be, computed once at boot
+   * so `login` has something to spend the same work against when the address
+   * is unknown. Random rather than a constant: a fixed hash committed to the
+   * repository is one an attacker can verify a response was measured against.
+   */
+  private readonly absentUserHash = bcrypt.hashSync(
+    randomUUID(),
+    BCRYPT_ROUNDS,
+  );
 
   constructor(
     private readonly prisma: PrismaService,
@@ -45,7 +74,7 @@ export class AuthService {
     this.refreshSecret = config.getOrThrow<string>('JWT_REFRESH_SECRET');
     // Parse at boot so a malformed TTL fails fast instead of silently widening.
     this.accessTtlMs = parseDurationMs(
-      config.get<string>('JWT_ACCESS_TTL') ?? '15m',
+      config.get<string>('JWT_ACCESS_TTL') ?? DEFAULT_ACCESS_TTL,
     );
     this.refreshTtlMs = parseDurationMs(
       config.get<string>('JWT_REFRESH_TTL') ?? '7d',
@@ -107,6 +136,120 @@ export class AuthService {
     return { sent: true };
   }
 
+  /**
+   * Begin a password reset. Answers the same way for a known and an unknown
+   * address: the route is unauthenticated, so anything that varied with the
+   * account's existence — status, body, or a materially different response
+   * time — would make it an enumeration oracle.
+   *
+   * The mail is handed off rather than awaited, and that is the part that makes
+   * the timing claim true. An SMTP handshake takes hundreds of milliseconds,
+   * so waiting for it put the known-address path an order of magnitude behind
+   * the unknown one and turned the response time into the oracle the body and
+   * the status were written to avoid. What is left is one extra UPDATE, which
+   * is inside the noise of a network round-trip. The throttler bounds the rest.
+   */
+  async forgotPassword(email: string): Promise<{ accepted: boolean }> {
+    const user = await this.users.findByEmail(email);
+    if (!user) {
+      this.logger.log('Password reset requested for an unknown address');
+      return { accepted: true };
+    }
+    // The link carries the token; the row keeps only its fingerprint, so the
+    // one copy that can take the account over lives in the user's inbox.
+    const token = randomUUID();
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordResetTokenHash: hashToken(token),
+        passwordResetTokenExpiresAt: new Date(Date.now() + RESET_TTL_MS),
+      },
+    });
+    const link = `${this.frontUrl}/reset-password?token=${token}`;
+    this.sendDetached(
+      {
+        to: email,
+        subject: 'Reset your password',
+        html:
+          `<p>Reset your password by clicking <a href="${link}">this link</a>. It expires in one hour.</p>` +
+          `<p>If you did not ask for this, ignore this email — your password has not changed.</p>`,
+      },
+      `reset link for ${email}: ${link}`,
+    );
+    return { accepted: true };
+  }
+
+  /**
+   * Send without holding the request open, logging whatever happens.
+   *
+   * Nothing about the response depends on the outcome — every caller answers
+   * the same whether the mail lands or not — so awaiting only spends the
+   * user's latency, and on the reset path it also leaks which addresses exist.
+   * A dropped mail during a shutdown is recoverable by asking again, which is
+   * the same recovery a failed send already had.
+   */
+  private sendDetached(
+    message: { to: string; subject: string; html: string },
+    devFallback: string,
+  ): void {
+    if (!this.mail.configured) {
+      // Dev fallback: surface the link in logs when no mailer is configured.
+      this.logger.warn(`Mailer disabled; ${devFallback}`);
+      return;
+    }
+    void this.mail.send(message).catch((err: unknown) => {
+      // The caller was told nothing either way, so a mailer failure must at
+      // least be visible here.
+      this.logger.error(
+        `Failed to send "${message.subject}" to ${message.to}: ${String(err)}`,
+      );
+    });
+  }
+
+  /**
+   * Complete a password reset. Consumes the token, replaces the hash and
+   * revokes every refresh token the user holds — a reset is what someone locked
+   * out of their account does, so any session still running is as likely to be
+   * whoever locked them out.
+   */
+  async resetPassword(
+    token: string,
+    password: string,
+  ): Promise<{ reset: boolean }> {
+    const user = await this.prisma.user.findUnique({
+      where: { passwordResetTokenHash: hashToken(token) },
+    });
+    if (
+      !user ||
+      !user.passwordResetTokenExpiresAt ||
+      user.passwordResetTokenExpiresAt < new Date()
+    ) {
+      throw new BadRequestException('Invalid or expired reset token');
+    }
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash,
+          passwordResetTokenHash: null,
+          passwordResetTokenExpiresAt: null,
+          // Following the link proves control of the inbox, which is the same
+          // thing the verification link proves. Leaving the account unverified
+          // here would ask the user to prove it twice with one mail round-trip.
+          emailVerified: true,
+        },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId: user.id, revoked: false },
+        data: { revoked: true },
+      }),
+    ]);
+    this.metrics.recordAuth('password_reset');
+    this.logger.log(`Password reset completed for user ${user.id}`);
+    return { reset: true };
+  }
+
   private async sendVerificationEmail(
     userId: string,
     email: string,
@@ -122,32 +265,75 @@ export class AuthService {
       },
     });
     const link = `${this.frontUrl}/verify-email?token=${token}`;
-    if (!this.mail.configured) {
-      // Dev fallback: surface the link in logs when no mailer is configured.
-      this.logger.warn(
-        `Mailer disabled; verification link for ${email}: ${link}`,
-      );
-      return;
-    }
-    try {
-      await this.mail.send({
+    // Never block registration on the mailer — the gate is soft, so the
+    // account is usable before the mail lands either way.
+    this.sendDetached(
+      {
         to: email,
         subject: 'Verify your email',
         html: `<p>Confirm your email address by clicking <a href="${link}">this link</a>. It expires in 24 hours.</p>`,
-      });
-    } catch (err) {
-      // Never block registration on a mailer hiccup — soft gate.
-      this.logger.error(
-        `Failed to send verification email to ${email}: ${String(err)}`,
-      );
-    }
+      },
+      `verification link for ${email}: ${link}`,
+    );
   }
 
+  /**
+   * Verify credentials in the same time whether or not the address exists.
+   *
+   * Skipping the comparison for an unknown address is the obvious shape and an
+   * enumeration oracle: bcrypt at twelve rounds takes a few hundred
+   * milliseconds, so "no such user" answered in about one, and the difference
+   * is trivially readable over a network. `forgotPassword` is careful about
+   * exactly this; leaving the front door open made that care pointless, since
+   * both routes answer the same question. The comparison runs against a hash
+   * no password can produce, and the result is discarded.
+   *
+   * Guessing is bounded per address as well as per caller. The throttler
+   * counts by IP, which a list of hosts divides at no cost to the attacker:
+   * ten a minute each is a few thousand an hour against one mailbox. This
+   * counts by address, so the budget is the account's however the attempts are
+   * spread.
+   */
   async login(dto: LoginDto): Promise<Tokens> {
+    const failureKey = loginFailureKey(dto.email);
+    const locked = await this.redis.failureCount(failureKey);
+    if (locked.count >= LOGIN_MAX_FAILURES) {
+      // Before the comparison, so a locked address costs no bcrypt either. The
+      // answer does not depend on whether the address exists, so it says
+      // nothing the caller could not already infer from their own attempts.
+      this.metrics.recordAuth('login_locked');
+      throw new HttpException(
+        {
+          message: 'Too many failed attempts. Try again later.',
+          retryAfter: locked.retryAfterSec,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const user = await this.users.findByEmail(dto.email);
-    if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
+    // Deliberately not short-circuited: `&&` would skip the compare and
+    // reintroduce the difference this exists to remove.
+    const passwordMatches = await bcrypt.compare(
+      dto.password,
+      user?.passwordHash ?? this.absentUserHash,
+    );
+    if (!user || !passwordMatches) {
+      // Counted for an unknown address too. Skipping it there would make the
+      // lockout itself the oracle the constant-time compare just closed.
+      const { count } = await this.redis.recordFailure(
+        failureKey,
+        LOGIN_LOCKOUT_SEC,
+      );
+      if (count === LOGIN_MAX_FAILURES) {
+        this.logger.warn(
+          `Locked sign-in for an address after ${count} failed attempts`,
+        );
+      }
       throw new UnauthorizedException('Invalid credentials');
     }
+
+    await this.redis.clearFailures(failureKey);
     this.metrics.recordAuth('login');
     return this.issueTokens(user.id, user.email);
   }
@@ -224,8 +410,21 @@ export class AuthService {
     return { success: true };
   }
 
-  // Refresh tokens are single-use and short-lived; revoked/expired rows are
-  // dead weight, so sweep them daily to keep the table bounded.
+  /**
+   * Keep the table bounded by sweeping rows that can no longer be presented.
+   *
+   * Expiry alone, deliberately. Sweeping revoked rows as well looks like the
+   * same statement and quietly disables reuse detection: a revoked row *is* the
+   * record that a token was already spent, and `refresh` reads its absence as
+   * "never issued" — an ordinary 401, with no family revocation. A leaked token
+   * replayed after the sweep therefore cost the attacker nothing and told us
+   * nothing, once a day, for every token rotated before midnight.
+   *
+   * A revoked row stops being useful when the token it fingerprints expires,
+   * because from then on `refresh` rejects it on the expiry check regardless.
+   * That is the same bound the row's own `expiresAt` gives, so nothing needs a
+   * second retention rule.
+   */
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { name: 'refresh-token-prune' })
   async pruneStaleTokens(): Promise<void> {
     // Every replica runs this cron. The delete is idempotent, so the lock is
@@ -241,7 +440,7 @@ export class AuthService {
     }
     try {
       const { count } = await this.prisma.refreshToken.deleteMany({
-        where: { OR: [{ revoked: true }, { expiresAt: { lt: new Date() } }] },
+        where: { expiresAt: { lt: new Date() } },
       });
       if (count > 0) {
         this.logger.log(`Pruned ${count} stale refresh token(s)`);
@@ -304,6 +503,22 @@ function hashToken(token: string): string {
 }
 
 /**
+ * Key for an address's run of failed sign-ins.
+ *
+ * Hashed and case-folded. Hashed because a plaintext address in a Redis key is
+ * a list of who has an account here, readable by anything that can run KEYS —
+ * the lockout is not worth handing that over. Case-folded because addresses
+ * are matched that way on the way in, and a key that is not would let the same
+ * account be guessed under `User@` and `user@` with separate budgets.
+ */
+function loginFailureKey(email: string): string {
+  const digest = createHash('sha256')
+    .update(email.trim().toLowerCase())
+    .digest('hex');
+  return `auth:login-fail:${digest}`;
+}
+
+/**
  * Constant-time comparison against a stored fingerprint. Rows written by the
  * previous bcrypt scheme cannot be verified and are rejected, so the sessions
  * holding them re-authenticate once.
@@ -315,17 +530,4 @@ function verifyTokenHash(token: string, stored: string): boolean {
     return false;
   }
   return timingSafeEqual(expected, actual);
-}
-
-/** Parse a JWT-style duration string (e.g. "15m", "7d") into milliseconds. */
-function parseDurationMs(value: string): number {
-  const match = /^(\d+)([smhd])$/.exec(value.trim());
-  if (!match) {
-    throw new Error(
-      `Invalid JWT duration "${value}" — expected a value like "15m" or "7d"`,
-    );
-  }
-  const amount = Number(match[1]);
-  const unit = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]]!;
-  return amount * unit;
 }

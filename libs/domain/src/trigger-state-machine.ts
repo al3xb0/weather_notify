@@ -60,8 +60,22 @@ export function decide(
   return { kind: 'FIRE' };
 }
 
+/**
+ * Whether enough time has passed since the last delivery.
+ *
+ * Deliberately blind to the state, which is the fix for the hole it used to
+ * have: treating ARMED as "cooldown does not apply" meant a condition that
+ * cleared and came back inside the window fired again immediately, because
+ * clearing it re-arms. A trigger oscillating around its threshold — the
+ * ordinary case for a temperature limit, not a pathological one — delivered on
+ * every poll while its owner had asked for one alert an hour.
+ *
+ * The two gates answer different questions and now stay separate: the state
+ * machine decides whether this is a new crossing, and the cooldown decides how
+ * often a crossing may be delivered. Only `lastFiredAt` can answer the second.
+ */
 function isCooldownElapsed(trigger: TriggerStateInput, now: Date): boolean {
-  if (trigger.state === TriggerState.ARMED || !trigger.lastFiredAt) {
+  if (!trigger.lastFiredAt) {
     return true;
   }
   const elapsedMs = now.getTime() - trigger.lastFiredAt.getTime();

@@ -1,6 +1,13 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
+import * as bcrypt from 'bcryptjs';
+import { RedisService } from '@app/common';
 import { PrismaService } from '@app/database';
 import { UsersService } from './users.service';
 import { CreatePushSubscriptionDto } from './dto/push-subscription.dto';
@@ -13,6 +20,8 @@ type PrismaMock = {
     findUnique: jest.Mock;
     create: jest.Mock;
     update: jest.Mock;
+    count: jest.Mock;
+    delete: jest.Mock;
   };
   pushSubscription: {
     findUnique: jest.Mock;
@@ -30,13 +39,17 @@ const pushDto: CreatePushSubscriptionDto = {
 describe('UsersService', () => {
   let service: UsersService;
   let prisma: PrismaMock;
+  let redis: { revokeUserTokens: jest.Mock };
 
   beforeEach(async () => {
+    redis = { revokeUserTokens: jest.fn().mockResolvedValue(undefined) };
     prisma = {
       user: {
         findUnique: jest.fn(),
         create: jest.fn(),
         update: jest.fn().mockResolvedValue({}),
+        count: jest.fn().mockResolvedValue(2),
+        delete: jest.fn().mockResolvedValue({}),
       },
       pushSubscription: {
         findUnique: jest.fn(),
@@ -47,7 +60,18 @@ describe('UsersService', () => {
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [UsersService, { provide: PrismaService, useValue: prisma }],
+      providers: [
+        UsersService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: RedisService, useValue: redis },
+        {
+          provide: ConfigService,
+          useValue: {
+            get: (key: string) =>
+              key === 'JWT_ACCESS_TTL' ? '15m' : undefined,
+          },
+        },
+      ],
     }).compile();
 
     service = module.get(UsersService);
@@ -165,6 +189,87 @@ describe('UsersService', () => {
       expect(prisma.pushSubscription.deleteMany).toHaveBeenCalledWith({
         where: { userId: 'u1', endpoint: pushDto.endpoint },
       });
+    });
+  });
+
+  describe('deleteAccount', () => {
+    const withPassword = async (role = 'USER') => ({
+      id: 'u1',
+      role,
+      passwordHash: await bcrypt.hash('Passw0rd!', 4),
+    });
+
+    it('rejects a user that no longer exists', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.deleteAccount('u1', 'Passw0rd!'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses a wrong password, so a leaked token cannot erase the account', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword());
+
+      await expect(
+        service.deleteAccount('u1', 'not-the-password'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(prisma.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes the row once the password checks out', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword());
+
+      await expect(service.deleteAccount('u1', 'Passw0rd!')).resolves.toEqual({
+        success: true,
+      });
+      // Everything the user owns cascades at the database, so one delete is
+      // the whole operation.
+      expect(prisma.user.delete).toHaveBeenCalledWith({ where: { id: 'u1' } });
+    });
+
+    it('denies the access tokens that outlive the row', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword());
+
+      await service.deleteAccount('u1', 'Passw0rd!');
+
+      // Refresh tokens cascade with the row, but an access token is stateless
+      // and stays valid for its full lifetime — long enough for another tab to
+      // keep writing against foreign keys that no longer resolve.
+      const [userId, ttl] = redis.revokeUserTokens.mock.calls[0] as [
+        string,
+        number,
+      ];
+      expect(userId).toBe('u1');
+      expect(ttl).toBe(900);
+    });
+
+    it('does not deny anything when the password was wrong', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword());
+
+      await expect(service.deleteAccount('u1', 'nope')).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(redis.revokeUserTokens).not.toHaveBeenCalled();
+    });
+
+    it('refuses to remove the last admin', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword('ADMIN'));
+      prisma.user.count.mockResolvedValue(1);
+
+      await expect(
+        service.deleteAccount('u1', 'Passw0rd!'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('lets an admin go when another one remains', async () => {
+      prisma.user.findUnique.mockResolvedValue(await withPassword('ADMIN'));
+      prisma.user.count.mockResolvedValue(2);
+
+      await expect(service.deleteAccount('u1', 'Passw0rd!')).resolves.toEqual({
+        success: true,
+      });
+      expect(prisma.user.delete).toHaveBeenCalled();
     });
   });
 });

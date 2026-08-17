@@ -2,7 +2,16 @@ import { Injectable } from '@nestjs/common';
 import { Counter, Histogram } from 'prom-client';
 import { getCounter, getHistogram, metricsRegistry } from '@app/common';
 
-export type AuthEvent = 'register' | 'login' | 'refresh';
+export type AuthEvent =
+  | 'register'
+  | 'login'
+  // A sign-in refused because the address had already run out of attempts.
+  // Worth its own series: a rise here is a guessing run, which looks nothing
+  // like a rise in ordinary failures and should not be averaged into them.
+  | 'login_locked'
+  | 'refresh'
+  | 'password_reset'
+  | 'account_deleted';
 
 @Injectable()
 export class MetricsService {

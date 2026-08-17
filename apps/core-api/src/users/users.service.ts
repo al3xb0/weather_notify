@@ -2,8 +2,13 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'node:crypto';
+import * as bcrypt from 'bcryptjs';
+import { RedisService } from '@app/common';
+import { DEFAULT_ACCESS_TTL, parseDurationMs } from '../auth/duration';
 import { PrismaService } from '@app/database';
 import { User } from '@prisma/client';
 import {
@@ -23,7 +28,20 @@ const TELEGRAM_LINK_TTL_MS = 15 * 60 * 1000;
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  /** Matches the access token's lifetime — see `deleteAccount`. */
+  private readonly accessTtlSec: number;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+    config: ConfigService,
+  ) {
+    this.accessTtlSec = Math.ceil(
+      parseDurationMs(
+        config.get<string>('JWT_ACCESS_TTL') ?? DEFAULT_ACCESS_TTL,
+      ) / 1000,
+    );
+  }
 
   findByEmail(email: string): Promise<User | null> {
     return this.prisma.user.findUnique({ where: { email } });
@@ -161,6 +179,45 @@ export class UsersService {
     await this.prisma.pushSubscription.deleteMany({
       where: { userId, endpoint: dto.endpoint },
     });
+    return { success: true };
+  }
+
+  /**
+   * Erase the account and everything it owns. Triggers, conditions, pinned
+   * cities, push subscriptions, notification history and sessions all cascade
+   * at the database, so this is one delete rather than a sequence that could
+   * half-finish.
+   *
+   * The password is re-checked here because the access token alone is not
+   * enough authority for something irreversible.
+   */
+  async deleteAccount(
+    userId: string,
+    password: string,
+  ): Promise<{ success: boolean }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (!(await bcrypt.compare(password, user.passwordHash))) {
+      throw new UnauthorizedException('Incorrect password');
+    }
+    if (user.role === 'ADMIN') {
+      const admins = await this.prisma.user.count({ where: { role: 'ADMIN' } });
+      // Locking everyone out of the admin surface is not a thing a user should
+      // be able to do to the deployment by tidying up their own account.
+      if (admins === 1) {
+        throw new ForbiddenException(
+          'You are the only admin — promote another account first',
+        );
+      }
+    }
+    await this.prisma.user.delete({ where: { id: userId } });
+    // The refresh tokens went with the row, but access tokens are stateless
+    // and stay valid for their full lifetime — and every request they make now
+    // points at rows that do not exist, which surfaces as a 500 rather than as
+    // being signed out. Deny them for exactly as long as they could live.
+    await this.redis.revokeUserTokens(userId, this.accessTtlSec);
     return { success: true };
   }
 }

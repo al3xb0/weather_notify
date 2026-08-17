@@ -34,6 +34,7 @@ type PrismaMock = {
     updateMany: jest.Mock;
     deleteMany: jest.Mock;
   };
+  $transaction: jest.Mock;
 };
 
 describe('AuthService', () => {
@@ -42,7 +43,13 @@ describe('AuthService', () => {
   let users: { findByEmail: jest.Mock; create: jest.Mock };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let mail: { configured: boolean; send: jest.Mock };
-  let redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
+  let redis: {
+    acquireLock: jest.Mock;
+    releaseLock: jest.Mock;
+    failureCount: jest.Mock;
+    recordFailure: jest.Mock;
+    clearFailures: jest.Mock;
+  };
 
   const buildModule = async (env = ENV): Promise<TestingModule> => {
     prisma = {
@@ -59,6 +66,11 @@ describe('AuthService', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
+      // The calls are already promises by the time they reach here, so awaiting
+      // the array is enough to model the batch.
+      $transaction: jest
+        .fn()
+        .mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops)),
     };
     users = {
       findByEmail: jest.fn().mockResolvedValue(null),
@@ -80,6 +92,13 @@ describe('AuthService', () => {
     redis = {
       acquireLock: jest.fn().mockResolvedValue('lock-token'),
       releaseLock: jest.fn().mockResolvedValue(true),
+      // Default: no address is locked out. The real client fails open the same
+      // way, so this is also what an unreachable Redis looks like.
+      failureCount: jest.fn().mockResolvedValue({ count: 0, retryAfterSec: 0 }),
+      recordFailure: jest
+        .fn()
+        .mockResolvedValue({ count: 1, retryAfterSec: 900 }),
+      clearFailures: jest.fn().mockResolvedValue(undefined),
     };
 
     return Test.createTestingModule({
@@ -189,6 +208,121 @@ describe('AuthService', () => {
       await expect(
         service.login({ email: 'user@example.com', password: 'wrong' }),
       ).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+
+    /**
+     * The two rejections above must not be distinguishable by how long they
+     * take, or the route is an account-enumeration oracle.
+     *
+     * The threshold is deliberately far from both sides it separates: skipping
+     * the comparison returns in well under a millisecond, while the bcrypt
+     * verification this now always spends costs hundreds at the configured
+     * work factor. Anything in between means the work happened.
+     */
+    it('spends a password verification even when the address is unknown', async () => {
+      users.findByEmail.mockResolvedValue(null);
+
+      const started = performance.now();
+      await expect(
+        service.login({ email: 'nobody@example.com', password: 'Passw0rd!' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(performance.now() - started).toBeGreaterThan(20);
+    });
+
+    /**
+     * The IP throttler is the wrong unit for guessing at one mailbox: a list
+     * of hosts divides it at no cost to the attacker. These count the attempts
+     * an address has absorbed, however they were spread.
+     */
+    describe('lockout', () => {
+      const attempt = () =>
+        service.login({ email: 'user@example.com', password: 'wrong' });
+
+      it('counts a failure against the address, keyed by a digest of it', async () => {
+        users.findByEmail.mockResolvedValue(null);
+
+        await expect(attempt()).rejects.toBeInstanceOf(UnauthorizedException);
+
+        const [key] = redis.recordFailure.mock.calls[0] as [string, number];
+        expect(key).toBe(`auth:login-fail:${sha256('user@example.com')}`);
+        // A plaintext address in a key is a list of who has an account here.
+        expect(key).not.toContain('user@example.com');
+      });
+
+      it('keys the same address identically whatever its casing', async () => {
+        users.findByEmail.mockResolvedValue(null);
+
+        await expect(
+          service.login({ email: '  User@Example.com ', password: 'wrong' }),
+        ).rejects.toBeInstanceOf(UnauthorizedException);
+
+        const [key] = redis.recordFailure.mock.calls[0] as [string, number];
+        expect(key).toBe(`auth:login-fail:${sha256('user@example.com')}`);
+      });
+
+      // Otherwise the lockout becomes the oracle the constant-time comparison
+      // above was written to close.
+      it('counts failures for an unknown address too', async () => {
+        users.findByEmail.mockResolvedValue(null);
+
+        await expect(
+          service.login({ email: 'nobody@example.com', password: 'wrong' }),
+        ).rejects.toBeInstanceOf(UnauthorizedException);
+
+        expect(redis.recordFailure).toHaveBeenCalled();
+      });
+
+      it('refuses a spent address before spending any bcrypt on it', async () => {
+        redis.failureCount.mockResolvedValue({
+          count: 10,
+          retryAfterSec: 420,
+        });
+
+        await expect(attempt()).rejects.toMatchObject({
+          status: 429,
+          response: { retryAfter: 420 },
+        });
+        expect(users.findByEmail).not.toHaveBeenCalled();
+      });
+
+      it('forgets the run once the right password arrives', async () => {
+        users.findByEmail.mockResolvedValue({
+          id: 'u1',
+          email: 'user@example.com',
+          passwordHash: await bcrypt.hash('Passw0rd!', 4),
+        });
+
+        await service.login({
+          email: 'user@example.com',
+          password: 'Passw0rd!',
+        });
+
+        expect(redis.clearFailures).toHaveBeenCalledWith(
+          `auth:login-fail:${sha256('user@example.com')}`,
+        );
+      });
+
+      /**
+       * Redis fails open everywhere else in this service, and sign-in is the
+       * one route where the alternative is locking every account in the system
+       * out at once.
+       */
+      it('signs in normally when the counter is unavailable', async () => {
+        redis.failureCount.mockResolvedValue({ count: 0, retryAfterSec: 0 });
+        users.findByEmail.mockResolvedValue({
+          id: 'u1',
+          email: 'user@example.com',
+          passwordHash: await bcrypt.hash('Passw0rd!', 4),
+        });
+
+        await expect(
+          service.login({ email: 'user@example.com', password: 'Passw0rd!' }),
+        ).resolves.toEqual({
+          accessToken: 'access.token',
+          refreshToken: expect.any(String),
+        });
+      });
     });
 
     it('issues a pair and stores only the token fingerprint', async () => {
@@ -492,6 +626,166 @@ describe('AuthService', () => {
     });
   });
 
+  describe('forgotPassword', () => {
+    it('answers the same for an unknown address as for a known one', async () => {
+      users.findByEmail.mockResolvedValue(null);
+
+      await expect(
+        service.forgotPassword('nobody@example.com'),
+      ).resolves.toEqual({ accepted: true });
+      // No row written and no mail sent — the only thing that must not differ
+      // is what the caller can observe.
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(mail.send).not.toHaveBeenCalled();
+    });
+
+    it('stores the fingerprint and mails the token itself', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+
+      await service.forgotPassword('user@example.com');
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: { passwordResetTokenHash: string } },
+      ];
+      const [{ html }] = mail.send.mock.calls[0] as [{ html: string }];
+      const token = /reset-password\?token=([\w-]+)/.exec(html)?.[1];
+      expect(token).toBeDefined();
+      expect(data.passwordResetTokenHash).toBe(sha256(token!));
+      expect(html).not.toContain(data.passwordResetTokenHash);
+    });
+
+    it('expires the token in an hour, not in a day like verification', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+
+      await service.forgotPassword('user@example.com');
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: { passwordResetTokenExpiresAt: Date } },
+      ];
+      const ttlMs = data.passwordResetTokenExpiresAt.getTime() - Date.now();
+      expect(ttlMs).toBeGreaterThan(59 * 60_000);
+      expect(ttlMs).toBeLessThanOrEqual(60 * 60_000);
+    });
+
+    it('still accepts when the mailer throws, so the caller learns nothing', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+      mail.send.mockRejectedValue(new Error('smtp down'));
+
+      await expect(service.forgotPassword('user@example.com')).resolves.toEqual(
+        { accepted: true },
+      );
+    });
+
+    /**
+     * The identical body and status are only half the defence. An SMTP
+     * handshake costs hundreds of milliseconds, so awaiting it made the
+     * known-address path measurably slower than the unknown one and put the
+     * oracle back in the response time.
+     */
+    it('does not wait for the mailer, which only the known address reaches', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+      let deliver!: () => void;
+      mail.send.mockReturnValue(
+        new Promise<void>((resolve) => {
+          deliver = resolve;
+        }),
+      );
+
+      await expect(service.forgotPassword('user@example.com')).resolves.toEqual(
+        { accepted: true },
+      );
+
+      expect(mail.send).toHaveBeenCalled();
+      deliver();
+    });
+  });
+
+  describe('resetPassword', () => {
+    it('rejects an unknown token', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.resetPassword('nope', 'N3w-Passw0rd!'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects an expired token without touching the password', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u1',
+        passwordResetTokenExpiresAt: new Date(Date.now() - 1),
+      });
+
+      await expect(
+        service.resetPassword('stale', 'N3w-Passw0rd!'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('looks the token up by its fingerprint, never by the token itself', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.resetPassword('good', 'N3w-Passw0rd!'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { passwordResetTokenHash: sha256('good') },
+      });
+    });
+
+    it('stores a bcrypt hash, burns the token and verifies the address', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u1',
+        passwordResetTokenExpiresAt: new Date(Date.now() + 60_000),
+      });
+
+      await expect(
+        service.resetPassword('good', 'N3w-Passw0rd!'),
+      ).resolves.toEqual({ reset: true });
+
+      const [{ data }] = prisma.user.update.mock.calls[0] as [
+        { data: Record<string, unknown> },
+      ];
+      expect(data.passwordHash).not.toContain('N3w-Passw0rd!');
+      expect(
+        await bcrypt.compare('N3w-Passw0rd!', data.passwordHash as string),
+      ).toBe(true);
+      expect(data.passwordResetTokenHash).toBeNull();
+      expect(data.passwordResetTokenExpiresAt).toBeNull();
+      // Following the link proved control of the inbox, which is the same
+      // thing the verification link proves.
+      expect(data.emailVerified).toBe(true);
+    });
+
+    it('revokes every live session, since a reset is what a locked-out user does', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u1',
+        passwordResetTokenExpiresAt: new Date(Date.now() + 60_000),
+      });
+
+      await service.resetPassword('good', 'N3w-Passw0rd!');
+
+      expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', revoked: false },
+        data: { revoked: true },
+      });
+      // Both writes go in one transaction: a password changed without the
+      // sessions dying would leave the attacker signed in.
+      expect(prisma.$transaction).toHaveBeenCalled();
+    });
+  });
+
   describe('resendVerification', () => {
     it('rejects a user that no longer exists', async () => {
       prisma.user.findUnique.mockResolvedValue(null);
@@ -530,22 +824,36 @@ describe('AuthService', () => {
   });
 
   describe('pruneStaleTokens', () => {
-    it('sweeps revoked and expired rows only', async () => {
+    it('sweeps expired rows', async () => {
       prisma.refreshToken.deleteMany.mockResolvedValue({ count: 3 });
 
       await service.pruneStaleTokens();
 
       const [{ where }] = prisma.refreshToken.deleteMany.mock.calls[0] as [
-        { where: { OR: unknown[] } },
+        { where: Record<string, unknown> },
       ];
-      expect(where.OR).toEqual([
-        { revoked: true },
-        { expiresAt: { lt: expect.any(Date) } },
-      ]);
+      expect(where).toEqual({ expiresAt: { lt: expect.any(Date) } });
       expect(redis.releaseLock).toHaveBeenCalledWith(
         'core-api:refresh-tokens:prune',
         'lock-token',
       );
+    });
+
+    /**
+     * A revoked row is the record that its token was already spent, and it is
+     * the only thing `refresh` has to tell a replay from a token that never
+     * existed. Sweeping revoked rows alongside expired ones therefore switched
+     * reuse detection off once a day for everything rotated before midnight.
+     */
+    it('keeps revoked rows, which are what reuse detection reads', async () => {
+      prisma.refreshToken.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.pruneStaleTokens();
+
+      const [{ where }] = prisma.refreshToken.deleteMany.mock.calls[0] as [
+        { where: Record<string, unknown> },
+      ];
+      expect(JSON.stringify(where)).not.toContain('revoked');
     });
 
     // Every replica runs the cron; one full-table delete is enough.

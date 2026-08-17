@@ -101,14 +101,27 @@ describe('AuthController rate limiting', () => {
     expect(ttlOf('logout')).toBe(60_000);
   });
 
-  it('throttles resend-verification hardest, guard or no guard', () => {
-    // Authenticated, but every call hands work to an external mailer and to
-    // someone's inbox — the tightest budget in the controller.
+  it('throttles the routes that send mail hardest, guard or no guard', () => {
+    // Every call hands work to an external mailer and to someone's inbox, so
+    // a loose bucket here is spent on a third party rather than on our own CPU
+    // — the tightest budget in the controller, authenticated or not.
+    const mailSending = ['resendVerification', 'forgotPassword'];
     const others = routes
-      .filter((route) => route !== 'resendVerification')
+      .filter((route) => !mailSending.includes(route))
       .map(limitOf)
       .filter((limit): limit is number => limit !== undefined);
 
-    expect(Math.min(...others)).toBeGreaterThan(limitOf('resendVerification')!);
+    for (const route of mailSending) {
+      expect(Math.min(...others)).toBeGreaterThan(limitOf(route)!);
+    }
+  });
+
+  it('throttles forgot-password, which is unauthenticated and mails a stranger', () => {
+    // The one route here that an anonymous caller can point at somebody else's
+    // address, so it gets the mail-sending budget rather than the looser one
+    // the other unauthenticated routes share.
+    expect(unauthenticated()).toContain('forgotPassword');
+    expect(limitOf('forgotPassword')).toBe(3);
+    expect(ttlOf('forgotPassword')).toBe(60_000);
   });
 });

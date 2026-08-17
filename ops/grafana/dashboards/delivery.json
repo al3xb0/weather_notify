@@ -1,0 +1,161 @@
+{
+  "uid": "weather-notify-delivery",
+  "title": "Weather Notify — delivery",
+  "tags": ["weather-notify"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Outbox backlog",
+      "description": "Staged events not yet accepted by the broker. A growing value means alerts are recorded but not delivered — this is the gauge to alert on.",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        }
+      },
+      "targets": [{ "expr": "watcher_outbox_pending", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Poll cycle duration",
+      "description": "Cycles are serialised behind a Redis lock, so one that outgrows the cron interval makes the next tick skip rather than overlap.",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "watcher_cycle_duration_seconds", "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Dead-lettered (1h)",
+      "description": "Terminal failures. Nothing consumes these queues, so each one is an alert a user was owed and did not get.",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(notifier_dead_lettered_total[1h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Duplicates skipped (1h)",
+      "description": "How often at-least-once delivery actually bites. Non-zero is healthy — it is the idempotency claim doing its job.",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(increase(notifier_duplicates_skipped_total[1h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delivery outcomes by channel",
+      "description": "Sent versus failed per channel. The retry ladder absorbs transient faults, so a sustained failure line is a provider outage or a bad credential.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum(rate(notifier_notifications_total[5m])) by (channel, status)",
+          "legendFormat": "{{channel}} · {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delivery latency p95 by channel",
+      "description": "Failures carry their own outcome label, so a slow timeout on a broken channel does not skew the successful percentiles.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(notifier_delivery_duration_seconds_bucket{outcome=\"success\"}[5m])) by (le, channel))",
+          "legendFormat": "{{channel}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Why alerts were withheld",
+      "description": "Answers the question users actually ask — why didn't I get an alert? The suppression reason is a label because it comes from a small fixed set.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum(rate(watcher_suppressed_total[15m])) by (reason)",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Evaluation and firing volume",
+      "description": "Triggers evaluated versus fired per cycle.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum(rate(watcher_triggers_evaluated_total[15m]))",
+          "legendFormat": "evaluated",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(watcher_triggers_fired_total[15m]))",
+          "legendFormat": "fired",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Weather cache hit ratio",
+      "description": "What keeps the upstream call count low. A collapse here means Redis is unreachable or the TTL no longer covers the poll interval.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
+      "targets": [
+        {
+          "expr": "sum(rate(watcher_weather_cache_total{result=\"hit\"}[30m])) / clamp_min(sum(rate(watcher_weather_cache_total[30m])), 0.001)",
+          "legendFormat": "hit ratio",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "API latency p95 by route",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(core_api_http_request_duration_seconds_bucket[5m])) by (le, route))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

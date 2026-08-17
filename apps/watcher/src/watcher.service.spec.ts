@@ -17,7 +17,18 @@ jest.mock('@app/domain', () => ({
   evaluateConditions: jest.fn(),
 }));
 
-import { evaluateConditions, TriggerState } from '@app/domain';
+import type { ConfigService } from '@nestjs/config';
+import { evaluateConditions, locationBucket, TriggerState } from '@app/domain';
+
+/**
+ * Concurrency of one by default, so the assertions below can still talk about
+ * the order locations are polled in. The cases that care about the pool set
+ * their own.
+ */
+const config = (overrides: Record<string, string> = {}): ConfigService =>
+  ({
+    get: (key: string) => ({ WATCHER_CONCURRENCY: '1', ...overrides })[key],
+  }) as unknown as ConfigService;
 
 const evalMock = evaluateConditions as jest.Mock;
 
@@ -110,6 +121,7 @@ describe('WatcherService', () => {
       m.weather,
       m.outbox,
       m.redis as never,
+      config(),
     );
   });
 
@@ -142,44 +154,185 @@ describe('WatcherService', () => {
     // Locations are polled one after another, so a large trigger set outlives
     // any fixed TTL. Without renewal the lock expires mid-pass and the next
     // tick starts a cycle alongside this one.
-    it('renews the lock before each location', async () => {
-      m.triggers.findActive.mockResolvedValue([
-        makeTrigger({ id: 't1' }),
-        makeTrigger({ id: 't2', latitude: 48.85, longitude: 2.35 }),
-      ]);
+    /**
+     * Renewal is on a timer rather than between locations. What the lock has
+     * to outlive is wall-clock time, and with several locations in flight
+     * there is no longer a point between them where the whole pass pauses.
+     */
+    describe('renewal', () => {
+      /** Holds every upstream call open so a pass can be inspected mid-flight. */
+      const stallUpstream = () => {
+        const waiting: (() => void)[] = [];
+        m.weather.getSnapshot.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              waiting.push(() => resolve(SNAPSHOT));
+            }),
+        );
+        return waiting;
+      };
+
+      beforeEach(() => {
+        jest.useFakeTimers();
+        evalMock.mockReturnValue({ matched: false, results: RESULTS });
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('renews while a pass is still running', async () => {
+        m.triggers.findActive.mockResolvedValue([makeTrigger({ id: 't1' })]);
+        const waiting = stallUpstream();
+
+        const cycle = service.runCycle();
+        await jest.advanceTimersByTimeAsync(41_000);
+
+        expect(m.redis.extendLock).toHaveBeenCalledWith(
+          'watcher:cycle:lock',
+          'lock-token',
+          120,
+        );
+        waiting[0]();
+        await cycle;
+      });
+
+      // A short cycle finishes well inside the TTL, so renewing it would be
+      // a Redis round-trip that buys nothing.
+      it('does not renew a pass that finishes inside the TTL', async () => {
+        m.triggers.findActive.mockResolvedValue([makeTrigger({ id: 't1' })]);
+
+        await service.runCycle();
+
+        expect(m.redis.extendLock).not.toHaveBeenCalled();
+      });
+
+      it('stops the pass when the lock is lost mid-cycle', async () => {
+        m.triggers.findActive.mockResolvedValue([
+          makeTrigger({ id: 't1' }),
+          makeTrigger({ id: 't2', latitude: 48.85, longitude: 2.35 }),
+        ]);
+        const waiting = stallUpstream();
+        m.redis.extendLock.mockResolvedValue(false);
+
+        const cycle = service.runCycle();
+        await jest.advanceTimersByTimeAsync(41_000);
+        waiting[0]();
+        await cycle;
+
+        // The second location is never reached: past a lost lock another cycle
+        // may already be running, and its writes are the ones that collide.
+        expect(m.weather.getSnapshot).toHaveBeenCalledTimes(1);
+        expect(m.triggers.recordObservation).toHaveBeenCalledTimes(1);
+      });
+
+      it('treats a Redis it cannot reach as a lost lock', async () => {
+        m.triggers.findActive.mockResolvedValue([
+          makeTrigger({ id: 't1' }),
+          makeTrigger({ id: 't2', latitude: 48.85, longitude: 2.35 }),
+        ]);
+        const waiting = stallUpstream();
+        m.redis.extendLock.mockRejectedValue(new Error('redis down'));
+
+        const cycle = service.runCycle();
+        await jest.advanceTimersByTimeAsync(41_000);
+        waiting[0]();
+        await cycle;
+
+        expect(m.weather.getSnapshot).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
+  /**
+   * A location is one upstream request and the writes behind it — almost
+   * entirely waiting. Strictly serial, a cycle costs the sum of every
+   * round-trip and overruns its own tick long before the trigger count is
+   * interesting.
+   */
+  describe('concurrency', () => {
+    const CITIES = [
+      { id: 'a', latitude: 52.52, longitude: 13.4 },
+      { id: 'b', latitude: 48.13, longitude: 11.57 },
+      { id: 'c', latitude: 41.39, longitude: 2.16 },
+      { id: 'd', latitude: 59.33, longitude: 18.07 },
+    ];
+
+    it('keeps several locations in flight, bounded by the cap', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
-
-      await service.runCycle();
-
-      expect(m.redis.extendLock).toHaveBeenCalledTimes(2);
-      expect(m.redis.extendLock).toHaveBeenCalledWith(
-        'watcher:cycle:lock',
-        'lock-token',
-        120,
+      m.triggers.findActive.mockResolvedValue(
+        CITIES.map((c) => makeTrigger(c)),
       );
+      let inFlight = 0;
+      let peak = 0;
+      m.weather.getSnapshot.mockImplementation(async () => {
+        peak = Math.max(peak, ++inFlight);
+        // Long enough that a serial pass could not overlap by accident, short
+        // enough to keep the suite fast.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        return SNAPSHOT;
+      });
+      const pooled = new WatcherService(
+        m.triggers,
+        m.weather,
+        m.outbox,
+        m.redis as never,
+        config({ WATCHER_CONCURRENCY: '2' }),
+      );
+
+      await pooled.runCycle();
+
+      expect(peak).toBe(2);
+      expect(m.weather.getSnapshot).toHaveBeenCalledTimes(CITIES.length);
     });
 
-    it('stops the pass when the lock is lost mid-cycle', async () => {
-      m.triggers.findActive.mockResolvedValue([
-        makeTrigger({ id: 't1' }),
-        makeTrigger({ id: 't2', latitude: 48.85, longitude: 2.35 }),
-      ]);
+    it('polls every location exactly once', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
-      m.redis.extendLock.mockResolvedValueOnce(true).mockResolvedValue(false);
+      m.triggers.findActive.mockResolvedValue(
+        CITIES.map((c) => makeTrigger(c)),
+      );
+      const pooled = new WatcherService(
+        m.triggers,
+        m.weather,
+        m.outbox,
+        m.redis as never,
+        config({ WATCHER_CONCURRENCY: '3' }),
+      );
 
-      await service.runCycle();
+      await pooled.runCycle();
 
-      expect(m.weather.getSnapshot).toHaveBeenCalledTimes(1);
-      expect(m.triggers.recordObservation).toHaveBeenCalledTimes(1);
+      const polled = (m.weather.getSnapshot.mock.calls as [number, number][])
+        .map(([lat, lon]) => `${lat}:${lon}`)
+        .sort();
+      expect(new Set(polled).size).toBe(CITIES.length);
+      expect(polled).toHaveLength(CITIES.length);
     });
 
-    it('stops the pass when Redis cannot be reached to renew', async () => {
-      m.triggers.findActive.mockResolvedValue([makeTrigger()]);
-      m.redis.extendLock.mockRejectedValue(new Error('redis down'));
+    // One bad location is not the cycle failing: the rest are unrelated
+    // coordinates, and this one is retried on the next tick.
+    it('carries on past a location whose upstream call fails', async () => {
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
+      m.triggers.findActive.mockResolvedValue(
+        CITIES.map((c) => makeTrigger(c)),
+      );
+      m.weather.getSnapshot
+        .mockRejectedValueOnce(new Error('upstream down'))
+        .mockResolvedValue(SNAPSHOT);
+      const pooled = new WatcherService(
+        m.triggers,
+        m.weather,
+        m.outbox,
+        m.redis as never,
+        config({ WATCHER_CONCURRENCY: '2' }),
+      );
 
-      await expect(service.runCycle()).resolves.toBeUndefined();
+      await pooled.runCycle();
 
-      expect(m.weather.getSnapshot).not.toHaveBeenCalled();
+      expect(m.weather.getSnapshot).toHaveBeenCalledTimes(CITIES.length);
+      expect(m.triggers.recordObservation).toHaveBeenCalledTimes(
+        CITIES.length - 1,
+      );
     });
   });
 
@@ -187,11 +340,11 @@ describe('WatcherService', () => {
     it('fetches weather once for co-located triggers', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
       m.triggers.findActive.mockResolvedValue([
-        makeTrigger({ id: 'a', latitude: 52.521, longitude: 13.405 }),
+        makeTrigger({ id: 'a', latitude: 52.521, longitude: 13.401 }),
         makeTrigger({ id: 'b', latitude: 52.524, longitude: 13.4049 }),
       ]);
       await service.runCycle();
-      // Both round to 52.52:13.40 → single upstream call, two evaluations.
+      // Both snap to 5252:1340 → single upstream call, two evaluations.
       expect(m.weather.getSnapshot).toHaveBeenCalledTimes(1);
       expect(evalMock).toHaveBeenCalledTimes(2);
     });
@@ -218,6 +371,104 @@ describe('WatcherService', () => {
       await service.runCycle();
       expect(m.weather.getSnapshot).toHaveBeenCalledTimes(2);
       expect(evalMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('sharding', () => {
+    const shardedService = (index: number, count: number) => {
+      const previous = { ...process.env };
+      process.env.WATCHER_SHARD_INDEX = String(index);
+      process.env.WATCHER_SHARD_COUNT = String(count);
+      // The shard is read when the service is constructed, so it has to be
+      // built inside the modified environment.
+      const built = new WatcherService(
+        m.triggers,
+        m.weather,
+        m.outbox,
+        m.redis as never,
+        config(),
+      );
+      process.env = previous;
+      return built;
+    };
+
+    const CITIES = [
+      { id: 'a', latitude: 52.52, longitude: 13.4 },
+      { id: 'b', latitude: 48.13, longitude: 11.57 },
+      { id: 'c', latitude: 41.39, longitude: 2.16 },
+      { id: 'd', latitude: 59.33, longitude: 18.07 },
+      { id: 'e', latitude: 45.46, longitude: 9.19 },
+      { id: 'f', latitude: 38.72, longitude: -9.14 },
+    ];
+
+    beforeEach(() => {
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
+      // Stands in for the query, which is where the restriction now lives: the
+      // shard reads its own slice rather than reading everything and
+      // discarding most of it.
+      m.triggers.findActive.mockImplementation((buckets?: number[]) =>
+        Promise.resolve(
+          CITIES.filter(
+            (c) =>
+              !buckets ||
+              buckets.includes(locationBucket(c.latitude, c.longitude)),
+          ).map((c) => makeTrigger(c)),
+        ),
+      );
+    });
+
+    it('polls everything when unsharded', async () => {
+      await service.runCycle();
+      expect(m.weather.getSnapshot).toHaveBeenCalledTimes(CITIES.length);
+    });
+
+    // An unrestricted query is the cheaper plan and the one that still returns
+    // rows written before the bucket column existed.
+    it('asks for no bucket restriction when unsharded', async () => {
+      await service.runCycle();
+      expect(m.triggers.findActive).toHaveBeenCalledWith(undefined);
+    });
+
+    it('takes only its own share, and the shares add up', async () => {
+      const shards = [0, 1, 2].map((i) => shardedService(i, 3));
+      const polled: string[] = [];
+
+      for (const shard of shards) {
+        m.weather.getSnapshot.mockClear();
+        await shard.runCycle();
+        for (const [lat, lon] of m.weather.getSnapshot.mock.calls as [
+          number,
+          number,
+        ][]) {
+          polled.push(`${lat}:${lon}`);
+        }
+      }
+
+      // Every city polled exactly once across the three instances: a location
+      // owned by nobody is never evaluated, one owned twice is a duplicate
+      // upstream call and a duplicate alert.
+      expect(polled).toHaveLength(CITIES.length);
+      expect(new Set(polled).size).toBe(CITIES.length);
+    });
+
+    it('locks per shard, so instances do not block each other', async () => {
+      await shardedService(2, 4).runCycle();
+
+      // One lock for the whole service would make a second instance skip its
+      // tick entirely, which is the behaviour sharding replaces.
+      expect(m.redis.acquireLock).toHaveBeenCalledWith(
+        'watcher:cycle:lock:2',
+        expect.any(Number),
+      );
+    });
+
+    it('keeps the original lock key when unsharded', async () => {
+      await service.runCycle();
+
+      expect(m.redis.acquireLock).toHaveBeenCalledWith(
+        'watcher:cycle:lock',
+        expect.any(Number),
+      );
     });
   });
 

@@ -23,18 +23,21 @@ import { AuthService } from './auth.service';
 import {
   AuthResponseDto,
   AuthUserDto,
+  ForgotPasswordResultDto,
   ResendVerificationResultDto,
+  ResetPasswordResultDto,
   VerifyEmailResultDto,
 } from './dto/auth-response.dto';
 import { SuccessResultDto } from '../common/dto/operation-result.dto';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import type { AuthUser, Tokens } from './types';
-
-const REFRESH_COOKIE = 'rt';
+import { REFRESH_COOKIE, refreshCookieOptions } from './refresh-cookie';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -45,13 +48,7 @@ export class AuthController {
     private readonly auth: AuthService,
     config: ConfigService,
   ) {
-    this.cookieBase = {
-      httpOnly: true,
-      secure: config.get('NODE_ENV') === 'production',
-      sameSite:
-        config.get<CookieOptions['sameSite']>('COOKIE_SAMESITE') ?? 'lax',
-      path: '/auth',
-    };
+    this.cookieBase = refreshCookieOptions(config);
   }
 
   @Post('register')
@@ -123,6 +120,29 @@ export class AuthController {
   @ApiOkResponse({ type: VerifyEmailResultDto })
   verifyEmail(@Body() dto: VerifyEmailDto): Promise<VerifyEmailResultDto> {
     return this.auth.verifyEmail(dto.token);
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  // Tighter than the rest of this controller: it is unauthenticated and sends
+  // mail, so it is the one route here where a loose bucket costs someone else's
+  // inbox rather than only our CPU.
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @ApiOkResponse({ type: ForgotPasswordResultDto })
+  forgotPassword(
+    @Body() dto: ForgotPasswordDto,
+  ): Promise<ForgotPasswordResultDto> {
+    return this.auth.forgotPassword(dto.email);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOkResponse({ type: ResetPasswordResultDto })
+  resetPassword(
+    @Body() dto: ResetPasswordDto,
+  ): Promise<ResetPasswordResultDto> {
+    return this.auth.resetPassword(dto.token, dto.password);
   }
 
   @Post('resend-verification')

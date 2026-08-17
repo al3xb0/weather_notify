@@ -73,6 +73,12 @@ model User {
   /// hand anyone a working confirmation for an address they do not own.
   emailVerificationTokenHash      String?            @unique
   emailVerificationTokenExpiresAt DateTime?
+  /// SHA-256 of the password-reset token, never the token itself — same
+  /// reasoning as [emailVerificationTokenHash], and the stakes are higher: this
+  /// one takes over the account outright, so a database dump must not contain a
+  /// usable reset for any address.
+  passwordResetTokenHash          String?            @unique
+  passwordResetTokenExpiresAt     DateTime?
   triggers                        Trigger[]
   pushSubs                        PushSubscription[]
   notifications                   Notification[]
@@ -98,11 +104,19 @@ model Trigger {
   state           TriggerState       @default(ARMED)
   lastFiredAt     DateTime?
   lastEvaluatedAt DateTime?
+  /// Which slice of the trigger set a watcher instance owns this row through.
+  /// Derived from the rounded coordinates by `locationBucket` in `@app/domain`
+  /// and written whenever they change, so the split is a predicate the
+  /// database can serve. Applying it in application code instead meant every
+  /// instance read the whole table each cycle and discarded most of it, which
+  /// made the DB load grow with the number of instances rather than shrink.
+  locationBucket  Int                @default(0)
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
 
-  @@index([isActive, latitude, longitude])
+  /// Serves the watcher's per-cycle scan: active rows, this instance's buckets.
+  @@index([isActive, locationBucket])
   @@index([userId])
 }
 

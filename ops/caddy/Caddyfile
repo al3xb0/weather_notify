@@ -1,0 +1,63 @@
+# Public edge for the API, and the only place TLS is terminated.
+#
+# Every port in docker-compose.yml binds to 127.0.0.1, so this file is what
+# decides what the internet can reach. It lived only on the VM for a while,
+# which made the deployment one unversioned file away from being reproducible —
+# and that file is the one holding the TLS configuration.
+#
+# Caddy runs on the host, not as a compose service. Two reasons: the loopback
+# bindings stay meaningful (a container edge would need the ports published to
+# the bridge, where anything else on the host could reach them), and the
+# certificate store must outlive `docker compose down -v`.
+#
+#   sudo cp ops/caddy/Caddyfile /etc/caddy/Caddyfile
+#   sudo tee /etc/caddy/env >/dev/null <<'EOF'
+#   WN_API_DOMAIN=api.example.com
+#   WN_ACME_EMAIL=you@example.com
+#   EOF
+#   # EnvironmentFile=/etc/caddy/env in the systemd unit, then:
+#   sudo systemctl reload caddy
+#
+# Grafana and Prometheus are deliberately absent. They stay on loopback and are
+# reached over an SSH tunnel: publishing a metrics query interface, or a
+# dashboard whose only defence is one password, buys nothing here.
+#
+# The UI is deployed separately (Vercel) and is not proxied here either. That
+# makes it a different site from the API, which is what forces
+# COOKIE_SAMESITE="none" and CORS_ORIGIN in .env — see .env.example.
+{
+	email {$WN_ACME_EMAIL}
+	# Nothing local needs to drive Caddy at runtime, and its admin API is
+	# unauthenticated by design.
+	admin off
+}
+
+{$WN_API_DOMAIN} {
+	encode zstd gzip
+
+	# One hop, and this is it. `TRUST_PROXY=1` in .env is the other half of the
+	# same decision: Caddy appends the client address to X-Forwarded-For, and
+	# the app trusts exactly one entry from its own end — so a client that sends
+	# its own X-Forwarded-For cannot move the rate limiter off its real address.
+	reverse_proxy 127.0.0.1:3000
+
+	header {
+		# The API is HTTPS-only from the first response onward. The refresh
+		# cookie is `Secure` in production, so a downgrade would not merely
+		# expose a request — it would break the session and invite a fallback.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		# helmet sets the rest; this drops what Caddy adds about itself.
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/api.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		# Request headers are not logged by default, which is what keeps the
+		# bearer token and the refresh cookie out of the file. Do not add them.
+	}
+}

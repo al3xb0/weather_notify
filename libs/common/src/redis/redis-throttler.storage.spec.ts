@@ -58,4 +58,25 @@ describe('RedisThrottlerStorage', () => {
 
     expect(calls[0].slice(4)).toEqual([60_000, 60, 60_000]);
   });
+
+  // The guard this backs is global. A store that rejects when Redis is down
+  // does not throttle anything — it answers every request in the API with a
+  // 500, which is a worse outage than the missing limit.
+  it('allows the request when Redis cannot be reached', async () => {
+    const redis = {
+      client: {
+        eval: () => Promise.reject(new Error('Command timed out')),
+      },
+    } as unknown as RedisService;
+    const storage = new RedisThrottlerStorage(redis);
+
+    const record = await storage.increment('k', 60_000, 60, 0, 'default');
+
+    expect(record).toEqual({
+      totalHits: 0,
+      timeToExpire: 60,
+      isBlocked: false,
+      timeToBlockExpire: 0,
+    });
+  });
 });

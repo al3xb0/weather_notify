@@ -3,7 +3,9 @@ const mockRedis = {
   set: jest.fn(),
   ttl: jest.fn(),
   del: jest.fn(),
+  exists: jest.fn(),
   eval: jest.fn(),
+  on: jest.fn(),
   disconnect: jest.fn(),
   status: 'ready',
 };
@@ -180,6 +182,103 @@ describe('RedisService', () => {
       await expect(service.extendLock('cycle', 'tok', 120)).resolves.toBe(
         false,
       );
+    });
+  });
+
+  /**
+   * The budget a sign-in address gets. Every method here fails open, because
+   * the alternative when Redis is unreachable is a counter that reads as
+   * exhausted and locks every account in the system out at once.
+   */
+  describe('failure counters', () => {
+    it('starts the window on the first failure and reports the count', async () => {
+      mockRedis.eval.mockResolvedValue([1, 900]);
+
+      await expect(
+        service.recordFailure('auth:login-fail:x', 900),
+      ).resolves.toEqual({ count: 1, retryAfterSec: 900 });
+      const args = mockRedis.eval.mock.calls[0] as unknown[];
+      expect(args.slice(1)).toEqual([1, 'auth:login-fail:x', '900']);
+    });
+
+    /**
+     * A window that restarted on every failure would never free the subject:
+     * an attacker who keeps guessing would hold the owner out of their own
+     * account indefinitely, which inverts what the lockout is for.
+     */
+    it('does not extend the window on later failures', async () => {
+      mockRedis.eval.mockResolvedValue([4, 500]);
+
+      const result = await service.recordFailure('auth:login-fail:x', 900);
+
+      // The expiry is set inside the script, and only on the first failure —
+      // which is why a fourth failure reports what is left of the original
+      // window rather than a fresh one.
+      const [script] = mockRedis.eval.mock.calls[0] as [string];
+      expect(script).toContain('if hits == 1 then');
+      expect(result).toEqual({ count: 4, retryAfterSec: 500 });
+    });
+
+    it('reports no failures for a subject with no window', async () => {
+      mockRedis.eval.mockResolvedValue([0, 0]);
+
+      await expect(service.failureCount('auth:login-fail:x')).resolves.toEqual({
+        count: 0,
+        retryAfterSec: 0,
+      });
+    });
+
+    it('reads an unreachable Redis as "no failures" rather than as a lockout', async () => {
+      mockRedis.eval.mockRejectedValue(new Error('Command timed out'));
+
+      await expect(service.failureCount('auth:login-fail:x')).resolves.toEqual({
+        count: 0,
+        retryAfterSec: 0,
+      });
+      await expect(
+        service.recordFailure('auth:login-fail:x', 900),
+      ).resolves.toEqual({ count: 0, retryAfterSec: 0 });
+    });
+
+    it('clears a subject without throwing when Redis is gone', async () => {
+      mockRedis.del.mockRejectedValue(new Error('Command timed out'));
+
+      await expect(
+        service.clearFailures('auth:login-fail:x'),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  /**
+   * Both halves of the denial list have a documented behaviour on an outage,
+   * and both only hold because commands have a deadline: an unbounded command
+   * does not reject when Redis is gone, it waits, and neither the fallback nor
+   * the error path below would ever run.
+   */
+  describe('token denial', () => {
+    it('bounds how long a command may wait', () => {
+      const Redis = jest.requireMock<{ default: jest.Mock }>('ioredis').default;
+      const [, options] = Redis.mock.calls.at(-1) as [
+        string,
+        { commandTimeout?: number; maxRetriesPerRequest?: number | null },
+      ];
+
+      expect(options.commandTimeout).toBeGreaterThan(0);
+      expect(options.maxRetriesPerRequest).not.toBeNull();
+    });
+
+    it('reports a denial that could not be written rather than throwing', async () => {
+      mockRedis.set.mockRejectedValue(new Error('Command timed out'));
+
+      // The deletion that called this has already committed; a 500 here would
+      // report a failure for work that succeeded.
+      await expect(service.revokeUserTokens('u1', 900)).resolves.toBe(false);
+    });
+
+    it('treats an unreachable Redis as "not revoked"', async () => {
+      mockRedis.exists.mockRejectedValue(new Error('Command timed out'));
+
+      await expect(service.isUserRevoked('u1')).resolves.toBe(false);
     });
   });
 

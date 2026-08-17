@@ -70,8 +70,28 @@ const cases: Case[] = [
 
   // ── Conditions met, cooldown gate ─────────────────────────────────────────
   {
-    name: 'ARMED fires regardless of a recent lastFiredAt',
+    // Re-arming is what a condition clearing does, so a trigger oscillating
+    // around its threshold arrives here on every poll. Firing because the
+    // state says ARMED would deliver an alert each time, whatever cooldown its
+    // owner set.
+    name: 'ARMED still waits out the cooldown of its last firing',
     trigger: { state: TriggerState.ARMED, lastFiredAt: NOW, cooldownMin: 60 },
+    matched: true,
+    expected: { kind: 'SUPPRESS', reason: 'cooldown' },
+  },
+  {
+    name: 'ARMED fires once the cooldown of its last firing has passed',
+    trigger: {
+      state: TriggerState.ARMED,
+      lastFiredAt: minutesAgo(61),
+      cooldownMin: 60,
+    },
+    matched: true,
+    expected: { kind: 'FIRE' },
+  },
+  {
+    name: 'a trigger that has never fired is not held back',
+    trigger: { state: TriggerState.ARMED, lastFiredAt: null, cooldownMin: 60 },
     matched: true,
     expected: { kind: 'FIRE' },
   },
@@ -173,6 +193,41 @@ describe('decide', () => {
         timezone: 'America/New_York',
       }),
     ).toEqual({ kind: 'FIRE' });
+  });
+
+  /**
+   * The gap the case table cannot show, because it takes more than one
+   * evaluation to open: a condition that clears and returns re-arms on the way
+   * through, and an ARMED trigger used to skip the cooldown entirely. Walked
+   * over a poll cycle, that delivered six alerts in an hour against a
+   * cooldown of sixty minutes.
+   */
+  it('holds a flapping condition to its cooldown across a poll cycle', () => {
+    const POLL_MIN = 5;
+    const cooldownMin = 60;
+    let state: TriggerState = TriggerState.ARMED;
+    let lastFiredAt: Date | null = null;
+    const fired: number[] = [];
+
+    for (let minute = 0; minute <= 60; minute += POLL_MIN) {
+      const now = new Date(NOW.getTime() + minute * 60_000);
+      // Alternates every poll: matched, cleared, matched, cleared…
+      const matched = (minute / POLL_MIN) % 2 === 0;
+      const decision = decide(
+        { state, lastFiredAt, cooldownMin },
+        { matched },
+        now,
+      );
+      if (decision.kind === 'FIRE') {
+        fired.push(minute);
+        state = TriggerState.FIRED;
+        lastFiredAt = now;
+      } else if (decision.kind === 'REARM') {
+        state = TriggerState.ARMED;
+      }
+    }
+
+    expect(fired).toEqual([0, 60]);
   });
 
   it('never suppresses without also being able to name a reason', () => {

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { ThrottlerStorage } from '@nestjs/throttler';
 import { RedisService } from './redis.service';
 
@@ -36,6 +36,8 @@ return {hits, redis.call('PTTL', KEYS[1]), 0}
  */
 @Injectable()
 export class RedisThrottlerStorage implements ThrottlerStorage {
+  private readonly logger = new Logger(RedisThrottlerStorage.name);
+
   constructor(private readonly redis: RedisService) {}
 
   async increment(
@@ -47,15 +49,34 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
   ): Promise<ThrottlerStorageRecord> {
     const hitKey = `throttle:${throttlerName}:${key}`;
     const blockKey = `${hitKey}:blocked`;
-    const [totalHits, windowTtl, blockTtl] = (await this.redis.client.eval(
-      INCREMENT,
-      2,
-      hitKey,
-      blockKey,
-      ttl,
-      limit,
-      blockDuration || ttl,
-    )) as [number, number, number];
+    let result: [number, number, number];
+    try {
+      result = (await this.redis.client.eval(
+        INCREMENT,
+        2,
+        hitKey,
+        blockKey,
+        ttl,
+        limit,
+        blockDuration || ttl,
+      )) as [number, number, number];
+    } catch (err) {
+      // Fails open. The guard this backs is global, so it sits in front of
+      // every request in the API: a store that throws when Redis is down does
+      // not rate-limit anything, it takes the whole surface down with it.
+      // Losing the limit for the duration of an outage is the smaller failure,
+      // and it is loud rather than silent.
+      this.logger.error(
+        `Rate limiting is unavailable, allowing the request: ${String(err)}`,
+      );
+      return {
+        totalHits: 0,
+        timeToExpire: toSeconds(ttl),
+        isBlocked: false,
+        timeToBlockExpire: 0,
+      };
+    }
+    const [totalHits, windowTtl, blockTtl] = result;
 
     return {
       totalHits,

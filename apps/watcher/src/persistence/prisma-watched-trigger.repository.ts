@@ -13,9 +13,14 @@ import {
 export class PrismaWatchedTriggerRepository implements WatchedTriggerRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findActive(): Promise<WatchedTrigger[]> {
+  async findActive(buckets?: number[]): Promise<WatchedTrigger[]> {
     const rows = await this.prisma.trigger.findMany({
-      where: { isActive: true },
+      // Served by the (isActive, locationBucket) index, so a shard reads its
+      // own slice rather than the table.
+      where: {
+        isActive: true,
+        ...(buckets ? { locationBucket: { in: buckets } } : {}),
+      },
       include: {
         conditions: { orderBy: { order: 'asc' } },
         user: {

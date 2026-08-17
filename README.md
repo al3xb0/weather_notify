@@ -6,6 +6,29 @@ Web Push**. Built as a NestJS monorepo with an asynchronous, message-driven core
 
 > Frontend lives in a separate repository: `weather_notify_web` (Next.js).
 
+![Triggers dashboard](docs/screenshots/dashboard.png)
+
+<details>
+<summary>More screens — trigger builder, delivery history, forecast</summary>
+
+**Building a trigger.** Conditions combine with AND/OR, the city comes from a
+geocoder, and the cooldown is what stops a sustained condition from alerting
+every cycle.
+
+![Trigger builder](docs/screenshots/trigger-form.png)
+
+**Delivery history.** One row per alert per channel, with the failure reason
+kept when a channel refuses — here a push subscription the browser expired.
+
+![Notification history](docs/screenshots/notifications.png)
+
+**Forecast.** Current conditions and five days for any city, served through the
+API rather than called from the browser ([ADR 0009](docs/adr/0009-proxying-the-upstream.md)).
+
+![Weather](docs/screenshots/weather.png)
+
+</details>
+
 ## Architecture
 
 ```mermaid
@@ -32,7 +55,7 @@ flowchart LR
 
 | Service | Role |
 |---------|------|
-| **core-api** | REST API: JWT auth, triggers CRUD, user/Telegram/push management, notifications history, Swagger (dev only) |
+| **core-api** | REST API: JWT auth, triggers CRUD, user/Telegram/push management, notifications history, the Open-Meteo proxy the UI reads through, Swagger (dev only) |
 | **watcher** | `@Cron` job: groups active triggers by location, polls Open-Meteo (Redis-cached), evaluates conditions, publishes `trigger.fired` |
 | **notifier** | Consumes per-channel queues, delivers via Telegram/Email/Web Push with retry/DLQ, persists every outcome |
 
@@ -47,74 +70,34 @@ Shared code lives in `libs/`:
 
 ## Architecture decisions
 
-Decisions worth arguing about, and why they went the way they did.
+Decisions worth arguing about, with what each one **gave up**, live in
+[`docs/adr/`](docs/adr/). The load-bearing ones:
 
-### Why microservices, and why a broker?
+| # | Decision | Why |
+|---|----------|-----|
+| [0001](docs/adr/0001-microservices-and-a-broker.md) | Three services and a broker | Failure isolation, not scale — a five-minute SMTP outage must not stall the poll cycle |
+| [0002](docs/adr/0002-domain-purity-not-clean-architecture.md) | One boundary, not full Clean Architecture | `libs/domain` imports nothing, enforced by eslint; the rest may be infrastructure |
+| [0003](docs/adr/0003-persistence-depends-on-the-domain.md) | `libs/database` knows the domain | A compile-time assertion where the two vocabularies meet |
+| [0004](docs/adr/0004-cqrs-in-one-module.md) | CQRS in `triggers` only | One module with commands says the split was a decision; every module saying it says nothing |
+| [0005](docs/adr/0005-a-queue-per-retry-stage.md) | One retry queue per delay | A shared queue head-of-line blocks |
+| [0006](docs/adr/0006-idempotency-claim-as-a-lease.md) | The claim is a lease | `PENDING` alone cannot tell a live consumer from a dead one |
+| [0007](docs/adr/0007-transactional-outbox.md) | The watcher never publishes directly | A crash between publish and record fires a second, unrecognisable event |
+| [0008](docs/adr/0008-openapi-as-the-client-contract.md) | A committed OpenAPI document | A shared package's guarantee without a registry |
+| [0009](docs/adr/0009-proxying-the-upstream.md) | The browser talks to one origin | A third party's uptime should not be a visible feature's uptime |
+| [0010](docs/adr/0010-sharding-the-watcher.md) | The watcher shards by location | Instances agree without talking to each other |
+| [0011](docs/adr/0011-denying-tokens-for-a-deleted-account.md) | A deny marker for deleted accounts | A stateless token cannot know its account is gone |
 
-Three processes, one deployment unit, one database. It is not microservices for
-scale — the load does not need it — but for **failure isolation**. Delivery is the
-part that talks to Telegram, SMTP and push services, all of which fail in ways
-outside our control. Keeping it behind a queue means a five-minute SMTP outage
-does not stall the poll cycle, and a slow channel cannot delay an unrelated one.
+## Using this as a starting point
 
-The broker also buys ordering-free fan-out: one fired event lands on the channel
-queues the trigger names, each retried independently. Doing that in-process would
-mean either sequential delivery (one bad channel blocks the rest) or hand-rolled
-concurrency with the same retry and persistence problems, solved worse.
+Weather is the signal, not the architecture. The outbox, the idempotency lease,
+the retry ladder and the anti-spam state machine apply to anything shaped like
+*watch a signal, alert when it crosses a line* — prices, uptime, stock levels,
+sensors.
 
-**What was given up:** a single fired event now needs an idempotency claim in the
-database (below), and every developer needs RabbitMQ running locally. Both are
-paid for once and by the platform, not per feature.
-
-### Why not full Clean Architecture?
-
-The domain is genuinely small — thresholds, a cooldown, a quiet window. Wrapping
-CRUD over a handful of rows per user in entities, use-case interactors and mappers
-would be more code than the rules it protects. So the split is drawn at exactly
-one line: **`libs/domain` is pure, everything else may be infrastructure.**
-
-`libs/domain` imports nothing from Nest, Prisma, or any IO package, and an eslint
-`no-restricted-imports` rule scoped to that directory keeps it that way. That is
-the whole boundary. Ports exist only where something real crosses it — the
-upstream weather API, the broker, and the read models of the two workers — not as
-a uniform tax on every service.
-
-That last part is a rule, not a mood: **the workers reach persistence through
-ports; core-api does not.** A worker's collaborators are the things that fail
-independently, and a delivery path that cannot be exercised without a database is
-a delivery path nobody tests properly — the notifier's channels used to query
-Prisma directly, which is why its retry and claim behaviour was asserted against
-mocked query shapes rather than against behaviour. core-api stays flat because
-its controllers *are* the database, near enough: a port there would be a second
-name for the same CRUD.
-
-### Why does `libs/database` know about the domain, and not the reverse?
-
-The domain declares `Metric`, `Operator`, `ConditionLogic`, `TriggerState`,
-`Channel` and `NotifStatus`. Prisma generates its own copies from the schema.
-Rather than have the domain import the ORM's enums, `libs/database` asserts the
-two vocabularies are mutually assignable:
-
-```ts
-type AssertEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
-export const DOMAIN_ENUMS_MATCH_PRISMA: [AssertEqual<Metric, PrismaMetric>, /* … */] = [true, /* … */];
-```
-
-Adding a value on one side alone fails the build here, where the two vocabularies
-meet, instead of at runtime. The arrow points from persistence to the domain
-because that is the direction the dependency should run.
-
-### Why CQRS in one module only?
-
-`triggers` goes through `@nestjs/cqrs`; nothing else does. Triggers are the only
-place where the write side carries rules the read side does not share — an email
-verification gate, a per-user limit, a test-send cooldown — so separating them
-buys something. The rest of the API is CRUD over a handful of rows per user, and
-a bus there would be ceremony with a worse stack trace.
-
-The boundary is the point. A codebase where every module has commands and queries
-says nothing about the code; one where a single module does says the split was a
-decision.
+[**docs/using-this-as-a-template.md**](docs/using-this-as-a-template.md) is the
+short version: four files decide what the system watches, and everything else
+stays. MIT licensed — see [CONTRIBUTING.md](CONTRIBUTING.md) to work on it and
+[SECURITY.md](SECURITY.md) before deploying a fork.
 
 ## Key features
 
@@ -127,8 +110,11 @@ decision.
   `(eventId, channel)` claim.
 - **Staged retry + a real dead-letter queue** with the reason recorded on the message.
 - **Email verification** (soft gate) and **Telegram deep-link binding** via long-polling bot.
-- **Prometheus metrics** on a separate, unpublished port; structured logging via pino with
-  per-delivery correlation.
+- **Prometheus metrics** on a separate, unpublished port, scraped by the stack itself,
+  with alert rules routed to a person through Alertmanager; structured logging via pino
+  with per-delivery correlation.
+- **Scheduled backups** that verify the archive and a restore CI actually performs.
+- **Horizontal scale for the poller** — shard by a hash of the location, no coordination.
 - **Generated client contract** — `openapi.json` is committed and CI fails if it drifts.
 
 ## Security
@@ -136,6 +122,21 @@ decision.
 - **Auth** — bcrypt (cost 12) password hashing; short-lived access JWT + rotating refresh
   token stored **hashed** in the DB. Refresh rotation includes **reuse detection**: replaying
   an already-rotated token revokes the user's entire token family.
+- **Deleting an account stops its tokens.** An access token is stateless and valid for its
+  full lifetime, so deletion — by the user or by an admin — writes a deny marker for that
+  window; a demotion does the same, since the role rides in the token
+  ([ADR 0011](docs/adr/0011-denying-tokens-for-a-deleted-account.md)).
+- **Sign-in is bounded per address, not only per caller.** The IP throttler is the wrong
+  unit for guessing at one mailbox — a list of hosts divides it at no cost to the attacker —
+  so ten failures against an address stop it being tried for fifteen minutes, however the
+  attempts were spread. The counter is keyed by a digest of the address, not the address,
+  and it fails open: a Redis outage must not lock out everybody at once.
+- **Login answers in the same time whether or not the address exists.** The password
+  comparison runs against a placeholder hash for an unknown address, so the route cannot be
+  used to enumerate accounts. `forgot-password` matches it in body, status, and by handing
+  the mail off instead of awaiting an SMTP round-trip only the known path would reach.
+- **Password reset** consumes a fingerprinted, one-hour token and revokes every session in
+  the same transaction as the password write.
 - **Refresh token transport** — delivered in an `httpOnly`, `SameSite`, path-scoped cookie
   (never exposed to JS); `Secure` in production.
 - **Hardening** — `helmet`, explicit CORS allow-list (no wildcard reflection), global +
@@ -144,7 +145,12 @@ decision.
 - **Input validation** — every DTO is validated (class-validator); IANA timezones and
   push endpoints are checked, and user-supplied text is HTML-escaped in outgoing emails.
 - **Fail-fast config** — environment is validated with zod at boot; secrets must be ≥ 32
-  chars and cannot be left as placeholders.
+  chars and cannot be left as placeholders. `COOKIE_SAMESITE` is an enum, since the value
+  is written into a `Set-Cookie` attribute where a typo is discarded by the browser rather
+  than rejected by anything; `"none"` additionally requires `NODE_ENV=production`, which is
+  what marks the cookie `Secure` — without it the browser drops the cookie and every reload
+  looks like a signed-out user. Grafana's admin password has no default either: the compose
+  file stops if it is unset.
 - **Least privilege** — Docker images run as a non-root user; infra ports bind to loopback.
 
 ## Tech stack
@@ -155,9 +161,19 @@ Redis · Passport/JWT · Open-Meteo · Nodemailer (SMTP) · web-push · Docker C
 ## Anti-spam design
 
 Each trigger has a state machine (`ARMED` → `FIRED`) plus a per-trigger `cooldownMin`.
-A trigger fires when the condition first becomes true (ARMED) and re-fires only after the
-cooldown elapses; when the condition clears it re-arms (hysteresis). This prevents a
-sustained condition (e.g. "temperature > 30 °C") from emitting an alert every cycle.
+The two answer different questions and both have to agree before an alert goes out.
+The state machine asks whether this is a *new* crossing: a trigger fires when the
+condition first becomes true, and re-arms once it clears (hysteresis), which is what
+stops a sustained condition — "temperature > 30 °C" through an August afternoon — from
+alerting every cycle. The cooldown asks how often a crossing may be *delivered*, and
+is measured from the last firing alone.
+
+Keeping the cooldown blind to the state is the part worth stating, because the
+obvious shortcut is wrong: letting ARMED mean "cooldown does not apply" reads fine
+until the condition oscillates around its threshold. Every clear re-arms it, so the
+gate is open on the next poll, and a temperature hovering at the limit delivers on
+every cycle against an hourly cooldown. Only `lastFiredAt` can answer "how long since
+the user last heard from us".
 
 The transition is a pure function in `libs/domain`:
 
@@ -194,11 +210,9 @@ notifications.email.retry.3    TTL 5m    ─┘
 notifications.email.dead                   ← terminal, nothing consumes it
 ```
 
-**Why one queue per stage rather than per-message TTLs?** A RabbitMQ queue only
-expires messages from its head, in publish order. One shared retry queue holding
-mixed delays means a message with a five-minute TTL at the front holds back every
-five-second one behind it — the classic head-of-line block. Separate queues make
-each delay independent.
+One queue per stage rather than per-message TTLs, because a RabbitMQ queue only
+expires messages from its head — a shared queue head-of-line blocks
+([ADR 0005](docs/adr/0005-a-queue-per-retry-stage.md)).
 
 The attempt count travels in a header rather than being read from `x-death`,
 which is unreliable across repeated main↔retry bounces.
@@ -232,19 +246,12 @@ two lines leaves the message on both queues, and the second copy would be
 delivered again. The unique index is the arbiter, so two consumers racing on the
 same redelivery cannot both win.
 
-A claim is a **lease**, not a flag. `PENDING` on its own cannot tell a consumer
-that is inside the channel call right now from one that died mid-send, and
-taking the row over in the first case sends the alert twice. `claimedAt` dates
-the attempt: the take-over is one conditional `UPDATE` that matches only rows
-nobody holds — unclaimed, or claimed longer ago than the lease — and a consumer
-that matches nothing raises a retryable error rather than sending. By the next
-attempt the holder has either settled the row, which reads as an ordinary
-duplicate, or died, and its lease has expired.
-
-A failed send hands the lease straight back, because the retry that follows is
-the same delivery continuing rather than a second consumer; a consumer that dies
-instead leaves the lease to expire on its own. A row still `PENDING` with an
-expired lease is therefore a real signal: a notifier died mid-send.
+A claim is a **lease**, not a flag: `claimedAt` dates the attempt, so a
+take-over matches only rows nobody holds and a consumer that died mid-send is
+distinguishable from one still inside the channel call
+([ADR 0006](docs/adr/0006-idempotency-claim-as-a-lease.md)). A row still
+`PENDING` with an expired lease is therefore a real signal: a notifier died
+mid-send.
 
 One claim covers one channel, which is the wrong grain for **web push**: it fans
 out to every browser subscription the user registered, and one of them failing
@@ -253,11 +260,10 @@ actually reached, so the retry re-sends only to the devices still owed the alert
 
 ### Transactional outbox
 
-The claim above keys on `eventId`, so it only recognises a duplicate of the *same*
-event. Publishing first and recording the firing second would defeat it: a crash
-in between leaves the trigger `ARMED`, and the next cycle fires it again under a
-fresh `eventId` — a genuinely different event, and a second alert the consumer has
-no way to recognise.
+The claim above only recognises a duplicate of the *same* event, so publishing
+before recording the firing would defeat it — a crash in between fires again
+next cycle under a fresh `eventId`, which the consumer cannot recognise as a
+repeat ([ADR 0007](docs/adr/0007-transactional-outbox.md)).
 
 So the watcher does not publish at all. `commitFire` writes the condition
 observations, the trigger's new state and one `OutboxEvent` row per channel in a
@@ -284,6 +290,37 @@ older than `NOTIFICATION_RETENTION_DAYS` (90 by default) in bounded chunks, unde
 a Redis lock so replicas do not contend over the same rows. `OutboxEvent` is kept
 for 24 hours after relay.
 
+### Backups
+
+Everything above protects a *message*. None of it survives losing the volume,
+which on a single-VM deployment is the failure that actually ends the service —
+so the `db-backup` sidecar dumps Postgres on a schedule and ships with the
+stack rather than living in a host crontab nobody reprovisions.
+
+Each run writes a custom-format dump, **verifies it is a readable archive**
+(`pg_restore --list`) before keeping it, and prunes copies older than
+`BACKUP_RETENTION_DAYS`. A dump is written to `.part` and renamed only when it
+completes, so a crash mid-dump cannot leave a truncated file that looks like a
+finished backup. A failed run logs and waits for the next window instead of
+exiting, because a container that stops is a backup that stops.
+
+Local dumps survive a dropped table, not a lost VM. Setting `BACKUP_S3_BUCKET`
+plus AWS credentials mirrors each one off-site — any S3-compatible store works
+(`AWS_ENDPOINT_URL` for B2, R2 or MinIO). A failed upload keeps the local copy.
+
+**To restore** — the procedure lives next to the thing that writes the files, so
+the two cannot drift:
+
+```bash
+docker compose stop core-api watcher notifier      # nobody holds a connection
+docker compose run --rm -T db-backup /scripts/restore.sh /backups/<file>.dump
+docker compose start core-api watcher notifier
+```
+
+`RESTORE_TARGET_DB` points the restore at a scratch database instead of the
+live one, which is how this gets rehearsed rather than first attempted on the
+day it matters. A backup nobody has restored is a hypothesis.
+
 ### Shutdown and health
 
 `/health` is liveness and answers 200 as long as the process runs — restarting it
@@ -304,7 +341,47 @@ through every main/retry/dead bounce, and an `AsyncLocalStorage` context feeds
 pino's `mixin`. That is what makes a single delivery traceable across three
 services and several requeues.
 
-Metrics are Prometheus, on a separate unpublished port per service.
+Metrics are Prometheus, on a separate unpublished port per service — and the
+stack scrapes them itself. `prometheus` collects all three services over the
+internal network and evaluates the rules in `ops/prometheus/alerts.yml`;
+`grafana` comes up with its datasource and dashboard already provisioned from
+files in the repository, so a panel change is a diff rather than a click
+nobody else can see. Both bind to loopback: reach them over an SSH tunnel
+instead of publishing an unauthenticated query interface.
+
+| Where | Port |
+|-------|------|
+| Grafana | <http://127.0.0.1:3005> (`GRAFANA_USER`/`GRAFANA_PASSWORD`) |
+| Prometheus | <http://127.0.0.1:9090> |
+| Alertmanager | <http://127.0.0.1:9093> |
+
+The rules page on what the system cannot recover from by itself — a service
+that stays unscraped, an outbox backlog that is not draining, sustained
+dead-lettering, a channel failing the majority of its deliveries, a poll cycle
+outgrowing its interval, a queue backing up. Anything the retry ladder or the
+relay already absorbs is a graph, not a page.
+
+### Where an alert goes
+
+Prometheus decides an alert is firing; **Alertmanager** decides who hears about
+it. Set `ALERT_WEBHOOK_URL` (Slack, Discord, Telegram — anything that accepts a
+POST) or `ALERT_EMAIL_TO`, which reuses the SMTP credentials the application
+already has. A webhook wins when both are set. With neither, alerts still fire
+and are visible in the UI but reach nobody — and the container says so loudly
+at startup rather than looking like a system with no alerts.
+
+Routing is where the noise is controlled, and three rules do most of it.
+Alerts group by name and service, so an incident that trips several rules
+arrives as one message. `critical` skips the group timer and repeats hourly;
+`info` is deliberately routed to a receiver that notifies nobody, because
+"the cache hit ratio is low" is a graph. An inhibit rule drops warnings for a
+service already reporting `critical` — a process that is down will also stop
+reporting its queue depth, and sending the consequence next to the cause is how
+one failure becomes a wall of pages.
+
+Alertmanager expands no environment variables in its config, so the container
+renders `alertmanager.tmpl.yml` at startup. CI asserts Prometheus discovered it
+and that the rendered config parsed.
 
 | Metric | Labels | Answers |
 |--------|--------|---------|
@@ -428,13 +505,32 @@ gate, and the smoke job.
 
 Honest list of what would break first, and what it would take.
 
-**The watcher is a single instance.** Concurrency is prevented by a Redis lock
-rather than by design, so a second instance would idle instead of sharing load.
-The lock is renewed per location as the cycle walks them, because a cycle that
-polls locations one at a time outlives any fixed TTL once the trigger set grows,
-and an expired lock is an invitation for the next tick to run alongside it.
-Sharding by a hash of the location would let instances split the trigger set with
-no coordination, since triggers are already grouped by location.
+**The watcher scales by sharding, and each shard is still single-instance.**
+Set `WATCHER_SHARD_COUNT` and give each replica its own `WATCHER_SHARD_INDEX`.
+Whole locations are assigned, never individual triggers — a location is what one
+upstream call covers, so splitting one would fetch the same coordinates twice.
+The assignment needs no leader, no rebalancing protocol and no shared state
+beyond the count: a location hashes into one of 1024 fixed buckets, and an
+instance owns the buckets where `bucket % count == index`.
+
+The bucket is stored on the row (`Trigger.locationBucket`, stamped by core-api
+whenever the coordinates are written) rather than computed while filtering, and
+that is the part that makes the split worth anything. Applying it in
+application code meant every instance still read the whole active set each
+cycle and discarded most of it: the upstream calls divided, the database reads
+multiplied by the number of instances. Stored, it is a `WHERE … IN (…)` against
+`(isActive, locationBucket)`, so each instance reads its own slice.
+
+The Redis lock stays, one per shard: instances holding different shards run
+concurrently, while two configured with the *same* shard still cannot overlap —
+which is what a redeploy briefly produces. It is renewed per location as the
+cycle walks them, because a cycle that polls locations one at a time outlives
+any fixed TTL once the trigger set grows.
+
+Rebalancing is the part that is not solved: changing `WATCHER_SHARD_COUNT`
+reassigns most locations at once, so a rolling change has a window where a
+location is owned by two instances or by none. Restarting the watchers together
+is the honest answer at this size; consistent hashing is what removes it.
 
 **Telegram polling is single-instance too, but core-api is not.** The API scales
 horizontally; `getUpdates`, which Telegram refuses to serve to two pollers at
@@ -442,22 +538,41 @@ once, is elected through a renewed Redis lock, so extra replicas stand by and
 take over within the lock's TTL if the poller stops. A webhook would remove the
 election entirely, at the cost of a publicly reachable HTTPS endpoint.
 
-**Open-Meteo is polled per location, sequentially.** Locations are deduplicated
+**Open-Meteo is polled a few locations at a time.** Locations are deduplicated
 (triggers rounded to two decimals share one call) and cached in Redis for four
 minutes, so the current cost is low. The TTL is deliberately under the poll
 interval: a longer-lived entry is handed back to the next cycle, which then
 re-evaluates data the previous one already acted upon — writes and wall time
-spent on a decision that cannot come out differently. Open-Meteo accepts batched
-coordinates, which is where this goes if the location count grows faster than
-the cache absorbs it.
+spent on a decision that cannot come out differently.
+
+`WATCHER_CONCURRENCY` (default 5) bounds how many are in flight. A location is
+one request and the writes behind it, which is almost entirely waiting, so a
+strictly serial pass costs the sum of every round-trip and overruns a five-minute
+tick at a few hundred locations — well before the trigger count is interesting.
+The cap is what keeps the alternative from being a burst at an upstream we do not
+control. Open-Meteo also accepts batched coordinates, which is where this goes if
+the location count grows faster than the cache and the pool absorb it.
+
+**The UI's own Open-Meteo calls go through the API.** City search and the
+weather page used to call Open-Meteo from the browser, which made a third
+party's CORS policy, quota and uptime part of the app's critical path — and put
+the failure where only users could see it. `GET /geocode` and `GET /weather`
+proxy both, cached in Redis (24h for coordinates, which do not move; 5 minutes
+for a forecast someone is looking at) and rate-limited per caller. The forecast
+cache is keyed by the same two-decimal rounding the watcher groups triggers by,
+so two people viewing one city cost one upstream call. That also let the
+frontend's CSP drop its `*.open-meteo.com` wildcard: the browser now talks to
+one origin.
 
 **Notification history lives in the primary database.** It is append-only, never
 joined against, and read as one paginated list. It will outgrow the tables the API
 actually queries; the natural move is a separate store with a retention policy.
 
-**Queue depth is not scraped.** Broker health — depth, consumer count, unacked
-messages — is the broker's metric, not the application's. That is `rabbitmq_exporter`
-next to the service, rather than something the notifier should report about itself.
+**Alert delivery is only as good as its channel.** Alertmanager routes to a
+webhook or to email, both of which are the same kind of thing the notifier
+already depends on — if SMTP is what is broken, the alert about SMTP will not
+arrive either. A second, independent channel (a pager service, an SMS gateway)
+is the standard answer and is not wired up here.
 
 ## Deployment
 
@@ -465,6 +580,14 @@ Runs 24/7 for free on an **Oracle Cloud Always Free** ARM VM via `docker compose
 (no cold starts). All three services build from a single parameterized `Dockerfile`
 (`APP` build arg) and run as a non-root user. See `weather_notify_web` for the matching
 frontend deploy (Vercel).
+
+**The public edge is versioned too.** Every port in `docker-compose.yml` binds to
+loopback; TLS is terminated by a host-level Caddy whose config is
+[`ops/caddy/Caddyfile`](ops/caddy/Caddyfile) — the API is the only thing proxied, and
+Grafana and Prometheus stay behind an SSH tunnel. Because the UI is on a different site
+than the API, that deploy also needs `COOKIE_SAMESITE="none"` (the refresh cookie is not
+sent cross-site under `lax`) and the UI's origin in `CORS_ORIGIN`. Both are stated in the
+core-api boot log, so the running configuration is readable rather than assumed.
 
 ---
 

@@ -132,6 +132,7 @@ describe('critical path: threshold crossed → notification delivered', () => {
       { getSnapshot: jest.fn().mockResolvedValue(HOT) },
       relay,
       redis,
+      { get: jest.fn() } as never,
     );
   });
 
@@ -259,6 +260,13 @@ describe('critical path: threshold crossed → notification delivered', () => {
     };
     await watcher.runCycle();
     expect(trigger.state).toBe(TriggerState.ARMED);
+
+    // Re-arming says the crossing is new; the cooldown still says how often
+    // one may be delivered, and it is measured from the last firing whatever
+    // the state. Without this the second crossing is suppressed — which is the
+    // point: a condition flapping around its threshold must not deliver on
+    // every cycle.
+    trigger.lastFiredAt = new Date(Date.now() - 31 * 60_000);
 
     (watcher as unknown as { weather: { getSnapshot: jest.Mock } }).weather = {
       getSnapshot: jest.fn().mockResolvedValue(HOT),

@@ -1,10 +1,10 @@
 {
   "name": "weather_notify",
   "version": "0.0.1",
-  "description": "",
-  "author": "",
+  "description": "Event-driven weather alerting system: NestJS microservices, RabbitMQ, transactional outbox, idempotent multi-channel delivery",
+  "author": "Aliaksei Konyshau",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "build": "nest build",
     "build:all": "nest build core-api && nest build watcher && nest build notifier",
@@ -124,10 +124,10 @@
     "coverageDirectory": "./coverage",
     "coverageThreshold": {
       "global": {
-        "statements": 62,
-        "branches": 53,
-        "functions": 53,
-        "lines": 62
+        "statements": "84",
+        "branches": "73",
+        "functions": "75",
+        "lines": "84"
       }
     },
     "testEnvironment": "node",

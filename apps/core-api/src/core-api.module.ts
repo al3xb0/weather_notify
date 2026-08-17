@@ -19,6 +19,7 @@ import { TriggersModule } from './triggers/triggers.module';
 import { MetaModule } from './meta/meta.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PinnedCitiesModule } from './pinned-cities/pinned-cities.module';
+import { OpenMeteoModule } from './open-meteo/open-meteo.module';
 import { AdminModule } from './admin/admin.module';
 import { MetricsModule } from './metrics/metrics.module';
 
@@ -49,6 +50,7 @@ import { MetricsModule } from './metrics/metrics.module';
     MetaModule,
     NotificationsModule,
     PinnedCitiesModule,
+    OpenMeteoModule,
     AdminModule,
   ],
   controllers: [CoreApiController],

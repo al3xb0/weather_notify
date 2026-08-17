@@ -85,6 +85,15 @@ jobs:
   # boots the real compose stack and asserts both.
   smoke:
     runs-on: ubuntu-latest
+
+    # Interpolated into the compose file, which has no default for these any
+    # more. The shell environment wins over .env, so setting them here is all
+    # that is needed — and a job that forgets to fails at `up` rather than at
+    # the Grafana assertions further down.
+    env:
+      GRAFANA_USER: admin
+      GRAFANA_PASSWORD: ci-grafana-password
+
     steps:
       - uses: actions/checkout@v4
 
@@ -142,6 +151,81 @@ jobs:
             -H "authorization: Bearer $token" -H 'content-type: application/json' \
             -d '{"name":"Heat","city":"Berlin","latitude":52.52,"longitude":13.405,"channels":["EMAIL"],"conditions":[{"metric":"TEMPERATURE","operator":"GT","threshold":30}]}')
           [ "$status" = "403" ] || { echo "expected 403 for an unverified user, got $status"; exit 1; }
+
+      # A backup nobody has restored is a hypothesis, and one nobody has taken
+      # is not even that. This runs the real dump against the real database and
+      # then restores it into a scratch schema, so both halves of the recovery
+      # path are exercised rather than assumed.
+      - name: Backups can be taken and restored
+        run: |
+          set -euo pipefail
+          docker compose exec -T db-backup /scripts/backup.sh once
+          # Newest, by mtime. The sidecar has already written one on start, and
+          # `ls -1` sorts ascending — so taking the first file restored the older
+          # dump and left the one this step just produced unexercised.
+          dump=$(docker compose exec -T db-backup sh -c 'ls -1t /backups/*.dump | head -1' | tr -d '\r')
+          [ -n "$dump" ] || { echo "no dump was written"; exit 1; }
+
+          docker compose exec -T postgres \
+            psql -U weather -d postgres -c 'CREATE DATABASE restore_drill'
+          docker compose exec -T -e RESTORE_TARGET_DB=restore_drill db-backup \
+            /scripts/restore.sh "$dump"
+          # The restored copy has to contain the schema, not merely load without
+          # error — an empty database restores cleanly too.
+          docker compose exec -T postgres psql -U weather -d restore_drill \
+            -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" \
+            | tr -d '\r' | { read -r tables; [ "$tables" -gt 5 ] || { echo "restored schema looks empty: $tables tables"; exit 1; }; }
+
+      # Metrics that nothing scrapes are a design, not an operation. This proves
+      # every target is actually being collected and that the alert rules load
+      # — a typo in a PromQL expression is otherwise invisible until the day the
+      # rule was supposed to fire.
+      - name: Prometheus scrapes every service and loads the rules
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            up=$(curl -fsS 'http://localhost:9090/api/v1/query?query=up' | jq '[.data.result[] | select(.value[1] == "1")] | length')
+            # core-api, watcher, notifier, rabbitmq, prometheus itself.
+            [ "$up" -ge 5 ] && break
+            sleep 3
+          done
+          curl -fsS 'http://localhost:9090/api/v1/targets' | jq -e '
+            [.data.activeTargets[] | select(.health != "up")] | length == 0
+          ' || { curl -sS http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health, lastError}'; exit 1; }
+          # Rules are parsed at load, so a broken expression shows up as a group
+          # that never appears rather than as a startup failure.
+          curl -fsS 'http://localhost:9090/api/v1/rules' \
+            | jq -e '[.data.groups[].rules[] | select(.name == "OutboxBacklogGrowing")] | length == 1'
+
+      # A rule that fires and reaches nobody is the failure the alerting stack
+      # exists to prevent, and it looks exactly like a healthy system. This
+      # asserts Prometheus actually discovered Alertmanager and that
+      # Alertmanager parsed its rendered config.
+      - name: Prometheus is wired to Alertmanager
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            curl -fsS http://localhost:9093/-/ready >/dev/null 2>&1 && break
+            sleep 3
+          done
+          curl -fsS 'http://localhost:9090/api/v1/alertmanagers' \
+            | jq -e '.data.activeAlertmanagers | length == 1'
+          # The route tree comes from the template that entrypoint.sh renders,
+          # so this also proves the substitution produced valid YAML.
+          curl -fsS 'http://localhost:9093/api/v2/status' \
+            | jq -e '.config.original | contains("group_by")'
+
+      - name: Grafana provisions its datasource and dashboard
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            curl -fsS http://localhost:3005/api/health >/dev/null 2>&1 && break
+            sleep 3
+          done
+          curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASSWORD" http://localhost:3005/api/datasources | jq -e '.[0].type == "prometheus"'
+          curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASSWORD" http://localhost:3005/api/search | jq -e '
+            [.[] | select(.uid == "weather-notify-delivery")] | length == 1
+          '
 
       - name: Service logs
         if: failure()

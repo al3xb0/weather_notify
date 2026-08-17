@@ -56,7 +56,18 @@ export interface OutboxMessage {
 }
 
 export interface WatchedTriggerRepository {
-  findActive(): Promise<WatchedTrigger[]>;
+  /**
+   * Active triggers in the given location buckets.
+   *
+   * The restriction is an argument rather than a filter the caller applies
+   * afterwards, because it has to reach the database. Reading every active
+   * trigger and keeping the ones this instance owns made the read cost grow
+   * with the number of instances — each one scanning the whole table to
+   * discard most of it — which is the opposite of what sharding is for.
+   *
+   * Omitted means all of them, which is the single-instance deployment.
+   */
+  findActive(buckets?: number[]): Promise<WatchedTrigger[]>;
   /** Persist the per-condition observations and the state patch atomically. */
   recordObservation(
     triggerId: string,

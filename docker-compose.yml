@@ -59,6 +59,12 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-weather}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-weather}
+    volumes:
+      # Enables rabbitmq_prometheus alongside the management plugin. Queue depth,
+      # consumer count and unacked messages are the broker's own metrics — the
+      # notifier has no business reporting them about itself — and this is the
+      # broker offering them, not a sidecar guessing.
+      - ./ops/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     ports:
       - "127.0.0.1:5672:5672"
       # Management UI is dev-only — do NOT publish it in production.
@@ -68,6 +74,34 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+
+  # Migrations run once, in their own container, and every service waits for it
+  # to exit cleanly.
+  #
+  # They used to be prepended to core-api's command, which made them a property
+  # of one replica's startup rather than of the deployment: scale core-api and
+  # N containers race the same migration, and — worse — the watcher only waited
+  # for core-api to *start*, so it could reach a schema that had not been
+  # migrated yet and fail on a column that did not exist. As a dependency with
+  # `service_completed_successfully`, the ordering is stated once and holds for
+  # every service and every replica count.
+  migrate:
+    build:
+      context: .
+      args:
+        APP: core-api
+    container_name: wn_migrate
+    restart: "no"
+    mem_limit: 512m
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather_notify}?schema=public
+    command: ["npx", "prisma", "migrate", "deploy"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   core-api:
     build:
@@ -82,7 +116,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather_notify}?schema=public
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-weather}:${RABBITMQ_PASSWORD:-weather}@rabbitmq:5672
-    command: sh -c "npx prisma migrate deploy && node dist/apps/core-api/main"
+    # The image already runs as an unprivileged user; these say the process
+    # cannot regain what it dropped, and needs none of the capabilities a
+    # container gets by default. A Node service binding a port above 1024 uses
+    # exactly zero of them.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     ports:
       # Loopback only — exposed to the internet through the Caddy reverse proxy
       # (TLS) in production, never directly. Use "3000:3000" for plain local dev.
@@ -95,6 +134,8 @@ services:
       timeout: 5s
       retries: 5
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:
@@ -115,14 +156,19 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather_notify}?schema=public
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-weather}:${RABBITMQ_PASSWORD:-weather}@rabbitmq:5672
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3002/ready || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
     depends_on:
-      core-api:
-        condition: service_started
+      # The schema, not core-api. Waiting on core-api to *start* said nothing
+      # about the migration it used to run, so this could reach a database that
+      # was still one column behind and fail on the first cycle.
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:
@@ -146,16 +192,155 @@ services:
     # Long enough for the consumer to cancel, drain in-flight deliveries and
     # close the channel (see DRAIN_TIMEOUT_MS) before SIGKILL.
     stop_grace_period: 40s
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3003/ready || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
 
+  # Everything else in this stack is built so a *message* survives a crash. None
+  # of it survives losing the volume, which on a single VM is the failure that
+  # ends the service — so the schedule ships with the stack rather than living
+  # in a host crontab nobody reprovisions.
+  db-backup:
+    build:
+      context: ./scripts/backup
+    container_name: wn_db_backup
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      PGHOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-weather}
+      POSTGRES_DB: ${POSTGRES_DB:-weather_notify}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-weather}
+      BACKUP_INTERVAL_SEC: ${BACKUP_INTERVAL_SEC:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      # Unset means local-only, which survives a dropped table but not a lost
+      # VM. Set it, with the credentials below, for that to be a real DR plan.
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      # S3-compatible object storage (Backblaze B2, Cloudflare R2, MinIO).
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
+    volumes:
+      # A named volume rather than a bind mount so the dumps survive
+      # `docker compose down` — the moment they are most likely to be wanted.
+      - backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # The loop dumps immediately on start, so without this the first backup of
+      # a fresh deployment races the migration and wins: a readable archive of a
+      # database with no tables, which is worse than no backup because it looks
+      # like one. On a daily interval that stays the only copy for a day.
+      migrate:
+        condition: service_completed_successfully
+
+  # The services have exposed Prometheus metrics all along; nothing scraped
+  # them, which made the whole metric surface a design rather than something
+  # anyone could look at. These two close that gap, and the alert rules turn
+  # `watcher_outbox_pending` from a documented suggestion into a real page.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: wn_prometheus
+    restart: unless-stopped
+    mem_limit: 512m
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Local retention only. This is not a long-term metrics store, and on a
+      # small VM an unbounded TSDB is the next thing to fill the disk.
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      # Loopback only, like the rest of the infra. Reach it over an SSH tunnel
+      # rather than publishing an unauthenticated query interface.
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      core-api:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+
+  # Prometheus decides an alert is firing; this decides who hears about it.
+  # Without it the rules were a dashboard nobody was watching at 3am.
+  alertmanager:
+    build:
+      context: ./ops/alertmanager
+    container_name: wn_alertmanager
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      # A webhook wins when both are set — Slack, Discord, Telegram or anything
+      # that accepts a POST. Email falls back to the same SMTP credentials the
+      # application already uses for verification mail.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+    volumes:
+      - alertmanagerdata:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    # The one container whose job is to be heard from when something breaks,
+    # and the one that was quietly restart-looping: `restart: unless-stopped`
+    # turns a broken entrypoint into a container that looks scheduled rather
+    # than failed. A healthcheck is what makes the difference visible in
+    # `docker compose ps` and gates it in `up --wait`.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: wn_grafana
+    restart: unless-stopped
+    mem_limit: 384m
+    environment:
+      # No fallback on purpose. This file is the deploy artifact, so a default
+      # here is not a convenience — it is the credential that ends up running,
+      # on the one service that puts the whole system on a screen. Unset or
+      # empty stops the stack here, where the message names the variable.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:?set GRAFANA_USER in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env}
+      # Nothing here is meant to be reachable anonymously, and the instance sits
+      # behind loopback anyway.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3005:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+
 volumes:
   pgdata:
+  backups:
+  promdata:
+  grafanadata:
+  alertmanagerdata:

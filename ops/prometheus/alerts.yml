@@ -1,0 +1,139 @@
+# Alerts worth waking up for. Each one names a failure the system cannot
+# self-correct — anything the retry ladder or the relay already recovers from is
+# a graph, not a page.
+groups:
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.job }} is not being scraped'
+          description: >-
+            The process is gone or its metrics port stopped answering. Compose
+            restarts a crashed container, so two minutes of this means it is
+            failing to come back rather than merely bouncing.
+
+  - name: delivery
+    rules:
+      # The gauge the README names. It counts staged rows directly rather than
+      # measuring the batch just drained, so it keeps rising when the relay
+      # falls behind instead of pinning at OUTBOX_BATCH_SIZE.
+      - alert: OutboxBacklogGrowing
+        expr: watcher_outbox_pending > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Outbox backlog is not draining ({{ $value }} rows staged)'
+          description: >-
+            Events are committed but not reaching the broker. The cron pass runs
+            every 30s and a pass stops at its first failure, so a backlog this
+            persistent means the broker is refusing publishes — alerts are being
+            recorded and not delivered.
+
+      # A dead letter is terminal: nothing consumes those queues, so every
+      # message here is an alert a user was owed and will never receive.
+      - alert: NotificationsDeadLettering
+        expr: sum(rate(notifier_dead_lettered_total[15m])) by (channel, reason) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Notifications are being parked ({{ $labels.channel }}, {{ $labels.reason }})'
+          description: >-
+            Sustained dead-lettering. `permanent` usually means a channel is
+            misconfigured — missing VAPID keys, an unlinked chat; `unparseable`
+            means something is publishing malformed payloads.
+
+      # Failures are expected and retried; a majority of them is not.
+      - alert: DeliveryFailureRateHigh
+        expr: >-
+          sum(rate(notifier_notifications_total{status="FAILED"}[10m])) by (channel)
+          /
+          clamp_min(sum(rate(notifier_notifications_total[10m])) by (channel), 0.001)
+          > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Most {{ $labels.channel }} deliveries are failing'
+          description: >-
+            Over half of the attempts on this channel failed for 15 minutes.
+            The retry ladder absorbs transient faults, so this is an outage at
+            the provider or a credential that expired.
+
+  - name: broker
+    rules:
+      # Depth is the broker's metric, so this reads it from rabbitmq_prometheus
+      # rather than asking the notifier about queues it is not consuming.
+      - alert: QueueBacklogGrowing
+        expr: sum(rabbitmq_queue_messages_ready{queue=~"notifications.*"}) by (queue) > 500
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Queue {{ $labels.queue }} is backing up ({{ $value }} ready)'
+          description: >-
+            Messages are arriving faster than they are consumed, or the consumer
+            has stopped taking them. Check NOTIFIER_PREFETCH and whether the
+            notifier is connected.
+
+      - alert: DeadQueueFilling
+        expr: sum(rabbitmq_queue_messages_ready{queue=~"notifications.*.dead"}) by (queue) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.queue }} holds {{ $value }} parked message(s)'
+          description: >-
+            Nothing consumes the dead queues, so these sit until someone looks.
+            Each is an alert a user never received; replay by publishing the
+            body back with the channel's .fired routing key and no x-attempts.
+
+  - name: polling
+    rules:
+      # The cycle is serialised behind a Redis lock: one that outgrows its
+      # interval does not overlap, it makes the next tick skip. Alerting at half
+      # the interval leaves room to act before evaluations start being missed.
+      - alert: WatcherCycleSlow
+        expr: watcher_cycle_duration_seconds > 150
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Poll cycle is taking {{ $value }}s'
+          description: >-
+            Locations are polled sequentially, so this grows with the number of
+            distinct locations. Past the cron interval the next tick is skipped
+            outright and triggers stop being evaluated on time.
+
+      - alert: WeatherProviderFailing
+        expr: rate(watcher_weather_fetch_failures_total[10m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Open-Meteo requests are failing'
+          description: >-
+            A location that cannot be fetched is skipped for the cycle, so
+            sustained failures mean triggers are silently not being evaluated.
+
+      # The cache is what keeps the upstream call count low; losing it turns
+      # every trigger location into a request on every cycle.
+      - alert: WeatherCacheMissing
+        expr: >-
+          sum(rate(watcher_weather_cache_total{result="hit"}[30m]))
+          /
+          clamp_min(sum(rate(watcher_weather_cache_total[30m])), 0.001)
+          < 0.1
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: 'Weather cache is barely hitting'
+          description: >-
+            Redis is unreachable, or the TTL no longer covers the poll interval.
+            Correctness is unaffected; the upstream request count is not.
