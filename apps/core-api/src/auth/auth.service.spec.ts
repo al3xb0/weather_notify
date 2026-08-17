@@ -43,7 +43,13 @@ describe('AuthService', () => {
   let users: { findByEmail: jest.Mock; create: jest.Mock };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let mail: { configured: boolean; send: jest.Mock };
-  let redis: { acquireLock: jest.Mock; releaseLock: jest.Mock };
+  let redis: {
+    acquireLock: jest.Mock;
+    releaseLock: jest.Mock;
+    failureCount: jest.Mock;
+    recordFailure: jest.Mock;
+    clearFailures: jest.Mock;
+  };
 
   const buildModule = async (env = ENV): Promise<TestingModule> => {
     prisma = {
@@ -86,6 +92,13 @@ describe('AuthService', () => {
     redis = {
       acquireLock: jest.fn().mockResolvedValue('lock-token'),
       releaseLock: jest.fn().mockResolvedValue(true),
+      // Default: no address is locked out. The real client fails open the same
+      // way, so this is also what an unreachable Redis looks like.
+      failureCount: jest.fn().mockResolvedValue({ count: 0, retryAfterSec: 0 }),
+      recordFailure: jest
+        .fn()
+        .mockResolvedValue({ count: 1, retryAfterSec: 900 }),
+      clearFailures: jest.fn().mockResolvedValue(undefined),
     };
 
     return Test.createTestingModule({
@@ -215,6 +228,101 @@ describe('AuthService', () => {
       ).rejects.toBeInstanceOf(UnauthorizedException);
 
       expect(performance.now() - started).toBeGreaterThan(20);
+    });
+
+    /**
+     * The IP throttler is the wrong unit for guessing at one mailbox: a list
+     * of hosts divides it at no cost to the attacker. These count the attempts
+     * an address has absorbed, however they were spread.
+     */
+    describe('lockout', () => {
+      const attempt = () =>
+        service.login({ email: 'user@example.com', password: 'wrong' });
+
+      it('counts a failure against the address, keyed by a digest of it', async () => {
+        users.findByEmail.mockResolvedValue(null);
+
+        await expect(attempt()).rejects.toBeInstanceOf(UnauthorizedException);
+
+        const [key] = redis.recordFailure.mock.calls[0] as [string, number];
+        expect(key).toBe(`auth:login-fail:${sha256('user@example.com')}`);
+        // A plaintext address in a key is a list of who has an account here.
+        expect(key).not.toContain('user@example.com');
+      });
+
+      it('keys the same address identically whatever its casing', async () => {
+        users.findByEmail.mockResolvedValue(null);
+
+        await expect(
+          service.login({ email: '  User@Example.com ', password: 'wrong' }),
+        ).rejects.toBeInstanceOf(UnauthorizedException);
+
+        const [key] = redis.recordFailure.mock.calls[0] as [string, number];
+        expect(key).toBe(`auth:login-fail:${sha256('user@example.com')}`);
+      });
+
+      // Otherwise the lockout becomes the oracle the constant-time comparison
+      // above was written to close.
+      it('counts failures for an unknown address too', async () => {
+        users.findByEmail.mockResolvedValue(null);
+
+        await expect(
+          service.login({ email: 'nobody@example.com', password: 'wrong' }),
+        ).rejects.toBeInstanceOf(UnauthorizedException);
+
+        expect(redis.recordFailure).toHaveBeenCalled();
+      });
+
+      it('refuses a spent address before spending any bcrypt on it', async () => {
+        redis.failureCount.mockResolvedValue({
+          count: 10,
+          retryAfterSec: 420,
+        });
+
+        await expect(attempt()).rejects.toMatchObject({
+          status: 429,
+          response: { retryAfter: 420 },
+        });
+        expect(users.findByEmail).not.toHaveBeenCalled();
+      });
+
+      it('forgets the run once the right password arrives', async () => {
+        users.findByEmail.mockResolvedValue({
+          id: 'u1',
+          email: 'user@example.com',
+          passwordHash: await bcrypt.hash('Passw0rd!', 4),
+        });
+
+        await service.login({
+          email: 'user@example.com',
+          password: 'Passw0rd!',
+        });
+
+        expect(redis.clearFailures).toHaveBeenCalledWith(
+          `auth:login-fail:${sha256('user@example.com')}`,
+        );
+      });
+
+      /**
+       * Redis fails open everywhere else in this service, and sign-in is the
+       * one route where the alternative is locking every account in the system
+       * out at once.
+       */
+      it('signs in normally when the counter is unavailable', async () => {
+        redis.failureCount.mockResolvedValue({ count: 0, retryAfterSec: 0 });
+        users.findByEmail.mockResolvedValue({
+          id: 'u1',
+          email: 'user@example.com',
+          passwordHash: await bcrypt.hash('Passw0rd!', 4),
+        });
+
+        await expect(
+          service.login({ email: 'user@example.com', password: 'Passw0rd!' }),
+        ).resolves.toEqual({
+          accessToken: 'access.token',
+          refreshToken: expect.any(String),
+        });
+      });
     });
 
     it('issues a pair and stores only the token fingerprint', async () => {

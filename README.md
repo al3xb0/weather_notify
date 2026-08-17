@@ -126,6 +126,15 @@ stays. MIT licensed — see [CONTRIBUTING.md](CONTRIBUTING.md) to work on it and
   full lifetime, so deletion — by the user or by an admin — writes a deny marker for that
   window; a demotion does the same, since the role rides in the token
   ([ADR 0011](docs/adr/0011-denying-tokens-for-a-deleted-account.md)).
+- **Sign-in is bounded per address, not only per caller.** The IP throttler is the wrong
+  unit for guessing at one mailbox — a list of hosts divides it at no cost to the attacker —
+  so ten failures against an address stop it being tried for fifteen minutes, however the
+  attempts were spread. The counter is keyed by a digest of the address, not the address,
+  and it fails open: a Redis outage must not lock out everybody at once.
+- **Login answers in the same time whether or not the address exists.** The password
+  comparison runs against a placeholder hash for an unknown address, so the route cannot be
+  used to enumerate accounts. `forgot-password` matches it in body, status, and by handing
+  the mail off instead of awaiting an SMTP round-trip only the known path would reach.
 - **Password reset** consumes a fingerprinted, one-hour token and revokes every session in
   the same transaction as the password write.
 - **Refresh token transport** — delivered in an `httpOnly`, `SameSite`, path-scoped cookie

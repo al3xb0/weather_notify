@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -27,6 +29,18 @@ const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 const RESET_TTL_MS = 60 * 60 * 1000;
 const PRUNE_LOCK_KEY = 'core-api:refresh-tokens:prune';
 const PRUNE_LOCK_TTL_SEC = 300;
+/**
+ * Failed sign-ins one address may accumulate before it stops being tried, and
+ * how long the window lasts.
+ *
+ * Ten is well above what a person mistyping their own password reaches and far
+ * below what a guessing run needs. Fifteen minutes is the cost of being wrong:
+ * short enough that a locked-out owner is not meaningfully inconvenienced,
+ * long enough that waiting it out cuts an attacker's rate to forty guesses an
+ * hour per address.
+ */
+const LOGIN_MAX_FAILURES = 10;
+const LOGIN_LOCKOUT_SEC = 15 * 60;
 
 @Injectable()
 export class AuthService {
@@ -273,8 +287,30 @@ export class AuthService {
    * exactly this; leaving the front door open made that care pointless, since
    * both routes answer the same question. The comparison runs against a hash
    * no password can produce, and the result is discarded.
+   *
+   * Guessing is bounded per address as well as per caller. The throttler
+   * counts by IP, which a list of hosts divides at no cost to the attacker:
+   * ten a minute each is a few thousand an hour against one mailbox. This
+   * counts by address, so the budget is the account's however the attempts are
+   * spread.
    */
   async login(dto: LoginDto): Promise<Tokens> {
+    const failureKey = loginFailureKey(dto.email);
+    const locked = await this.redis.failureCount(failureKey);
+    if (locked.count >= LOGIN_MAX_FAILURES) {
+      // Before the comparison, so a locked address costs no bcrypt either. The
+      // answer does not depend on whether the address exists, so it says
+      // nothing the caller could not already infer from their own attempts.
+      this.metrics.recordAuth('login_locked');
+      throw new HttpException(
+        {
+          message: 'Too many failed attempts. Try again later.',
+          retryAfter: locked.retryAfterSec,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const user = await this.users.findByEmail(dto.email);
     // Deliberately not short-circuited: `&&` would skip the compare and
     // reintroduce the difference this exists to remove.
@@ -283,8 +319,21 @@ export class AuthService {
       user?.passwordHash ?? this.absentUserHash,
     );
     if (!user || !passwordMatches) {
+      // Counted for an unknown address too. Skipping it there would make the
+      // lockout itself the oracle the constant-time compare just closed.
+      const { count } = await this.redis.recordFailure(
+        failureKey,
+        LOGIN_LOCKOUT_SEC,
+      );
+      if (count === LOGIN_MAX_FAILURES) {
+        this.logger.warn(
+          `Locked sign-in for an address after ${count} failed attempts`,
+        );
+      }
       throw new UnauthorizedException('Invalid credentials');
     }
+
+    await this.redis.clearFailures(failureKey);
     this.metrics.recordAuth('login');
     return this.issueTokens(user.id, user.email);
   }
@@ -451,6 +500,22 @@ export class AuthService {
  */
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * Key for an address's run of failed sign-ins.
+ *
+ * Hashed and case-folded. Hashed because a plaintext address in a Redis key is
+ * a list of who has an account here, readable by anything that can run KEYS —
+ * the lockout is not worth handing that over. Case-folded because addresses
+ * are matched that way on the way in, and a key that is not would let the same
+ * account be guessed under `User@` and `user@` with separate budgets.
+ */
+function loginFailureKey(email: string): string {
+  const digest = createHash('sha256')
+    .update(email.trim().toLowerCase())
+    .digest('hex');
+  return `auth:login-fail:${digest}`;
 }
 
 /**

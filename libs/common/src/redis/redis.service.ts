@@ -9,6 +9,25 @@ const RELEASE_IF_OWNED =
 const EXTEND_IF_OWNED =
   "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end";
 
+// Count and remaining window in one round-trip. The expiry is set only on the
+// first failure, so the window does not slide: it starts when the run of
+// failures did and frees the subject on its own.
+const RECORD_FAILURE = `
+local hits = redis.call('INCR', KEYS[1])
+if hits == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return {hits, redis.call('TTL', KEYS[1])}
+`;
+
+const READ_FAILURES = `
+local hits = redis.call('GET', KEYS[1])
+if not hits then
+  return {0, 0}
+end
+return {tonumber(hits), redis.call('TTL', KEYS[1])}
+`;
+
 /**
  * How long a single command may wait before it is treated as a failure.
  *
@@ -141,6 +160,65 @@ export class RedisService implements OnModuleDestroy {
       return (await this.client.exists(revokedKey(userId))) === 1;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Register a failed attempt against a subject, returning how many are now in
+   * the window and how long is left on it.
+   *
+   * The window starts at the first failure and is not extended by later ones:
+   * a fixed window that eventually frees the subject on its own, rather than
+   * one an attacker can keep alive indefinitely by continuing to guess — which
+   * would turn a lockout meant to protect an account into a way to hold its
+   * owner out of it.
+   *
+   * **Fails open**, like every other consultation of this client: a subject
+   * whose failures cannot be counted is reported as having none.
+   */
+  async recordFailure(
+    key: string,
+    windowSec: number,
+  ): Promise<{ count: number; retryAfterSec: number }> {
+    try {
+      const [count, ttl] = (await this.client.eval(
+        RECORD_FAILURE,
+        1,
+        key,
+        String(windowSec),
+      )) as [number, number];
+      return { count, retryAfterSec: ttl > 0 ? ttl : windowSec };
+    } catch (err) {
+      this.logger.warn(`Could not record a failure for ${key}: ${String(err)}`);
+      return { count: 0, retryAfterSec: 0 };
+    }
+  }
+
+  /**
+   * How many failures a subject has in the current window, and how long is
+   * left on it. Fails open: an unreachable Redis answers "none".
+   */
+  async failureCount(
+    key: string,
+  ): Promise<{ count: number; retryAfterSec: number }> {
+    try {
+      const [count, ttl] = (await this.client.eval(READ_FAILURES, 1, key)) as [
+        number,
+        number,
+      ];
+      return { count, retryAfterSec: ttl > 0 ? ttl : 0 };
+    } catch (err) {
+      this.logger.warn(`Could not read failures for ${key}: ${String(err)}`);
+      return { count: 0, retryAfterSec: 0 };
+    }
+  }
+
+  /** Forget a subject's failures — what a successful attempt does. */
+  async clearFailures(key: string): Promise<void> {
+    try {
+      await this.client.del(key);
+    } catch (err) {
+      this.logger.warn(`Could not clear failures for ${key}: ${String(err)}`);
     }
   }
 
