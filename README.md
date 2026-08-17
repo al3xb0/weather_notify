@@ -501,11 +501,20 @@ gate, and the smoke job.
 Honest list of what would break first, and what it would take.
 
 **The watcher scales by sharding, and each shard is still single-instance.**
-Set `WATCHER_SHARD_COUNT` and give each replica its own `WATCHER_SHARD_INDEX`:
-an instance owns a location when `hash(location) % count == index`, which needs
-no leader, no rebalancing protocol and no shared state beyond the count. Whole
-locations are assigned, never individual triggers — a location is what one
+Set `WATCHER_SHARD_COUNT` and give each replica its own `WATCHER_SHARD_INDEX`.
+Whole locations are assigned, never individual triggers — a location is what one
 upstream call covers, so splitting one would fetch the same coordinates twice.
+The assignment needs no leader, no rebalancing protocol and no shared state
+beyond the count: a location hashes into one of 1024 fixed buckets, and an
+instance owns the buckets where `bucket % count == index`.
+
+The bucket is stored on the row (`Trigger.locationBucket`, stamped by core-api
+whenever the coordinates are written) rather than computed while filtering, and
+that is the part that makes the split worth anything. Applying it in
+application code meant every instance still read the whole active set each
+cycle and discarded most of it: the upstream calls divided, the database reads
+multiplied by the number of instances. Stored, it is a `WHERE … IN (…)` against
+`(isActive, locationBucket)`, so each instance reads its own slice.
 
 The Redis lock stays, one per shard: instances holding different shards run
 concurrently, while two configured with the *same* shard still cannot overlap —

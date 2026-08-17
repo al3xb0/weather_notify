@@ -104,11 +104,19 @@ model Trigger {
   state           TriggerState       @default(ARMED)
   lastFiredAt     DateTime?
   lastEvaluatedAt DateTime?
+  /// Which slice of the trigger set a watcher instance owns this row through.
+  /// Derived from the rounded coordinates by `locationBucket` in `@app/domain`
+  /// and written whenever they change, so the split is a predicate the
+  /// database can serve. Applying it in application code instead meant every
+  /// instance read the whole table each cycle and discarded most of it, which
+  /// made the DB load grow with the number of instances rather than shrink.
+  locationBucket  Int                @default(0)
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
 
-  @@index([isActive, latitude, longitude])
+  /// Serves the watcher's per-cycle scan: active rows, this instance's buckets.
+  @@index([isActive, locationBucket])
   @@index([userId])
 }
 

@@ -6,6 +6,7 @@ import {
   decide,
   EvaluatedCondition,
   evaluateConditions,
+  locationKey,
   TriggerState,
   WeatherSnapshot,
 } from '@app/domain';
@@ -21,7 +22,7 @@ import { OutboxRelayService } from './outbox/outbox-relay.service';
 import type { OutboxFlusher } from './ports/outbox.repository';
 import { WEATHER_PROVIDER } from './ports/weather-provider.port';
 import type { WeatherProvider } from './ports/weather-provider.port';
-import { ownsLocation, shardFromEnv, type ShardConfig } from './sharding';
+import { shardBuckets, shardFromEnv, type ShardConfig } from './sharding';
 
 // One lock per shard rather than one for the whole service: two instances
 // holding different shards must run at the same time — that is the point —
@@ -107,26 +108,25 @@ export class WatcherService {
   }
 
   private async poll(lockToken: string): Promise<void> {
-    const triggers = await this.triggers.findActive();
+    // Restricted in the query, not after it. Whole locations, never individual
+    // triggers: a location is what one upstream call covers, so splitting one
+    // across instances would fetch the same coordinates twice and undo the
+    // deduplication — which is why the bucket is derived from the location and
+    // stamped on the row.
+    const triggers = await this.triggers.findActive(shardBuckets(this.shard));
     if (triggers.length === 0) {
       return;
     }
 
     const byLocation = this.groupByLocation(triggers);
-    // Whole locations, never individual triggers: a location is what one
-    // upstream call covers, so splitting one across instances would fetch the
-    // same coordinates twice and undo the deduplication.
-    const mine = [...byLocation.entries()].filter(([key]) =>
-      ownsLocation(key, this.shard),
-    );
     this.logger.log(
       this.shard.count > 1
-        ? `Polling ${mine.length} of ${byLocation.size} location(s) ` +
+        ? `Polling ${byLocation.size} location(s) ` +
             `(shard ${this.shard.index + 1}/${this.shard.count}) for ${triggers.length} trigger(s)`
         : `Polling ${byLocation.size} location(s) for ${triggers.length} trigger(s)`,
     );
 
-    for (const [, group] of mine) {
+    for (const [, group] of byLocation) {
       // Renewed per location, which is the unit of work that can stall: one
       // upstream call plus its retry. A cycle slower than the TTL would
       // otherwise hand the next tick a free lock and run alongside it.
@@ -174,7 +174,7 @@ export class WatcherService {
   ): Map<string, WatchedTrigger[]> {
     const map = new Map<string, WatchedTrigger[]>();
     for (const t of triggers) {
-      const key = `${t.latitude.toFixed(2)}:${t.longitude.toFixed(2)}`;
+      const key = locationKey(t.latitude, t.longitude);
       const bucket = map.get(key);
       if (bucket) {
         bucket.push(t);

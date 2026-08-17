@@ -1,0 +1,77 @@
+/**
+ * How a coordinate pair becomes a unit of work, and how those units are split
+ * across watcher instances.
+ *
+ * This lives in the domain rather than next to the watcher because two sides
+ * have to agree on it: core-api stamps a trigger's bucket when the row is
+ * written, and the watcher selects on it. A second copy of the hash would be a
+ * silent way for a location to be claimed by nobody.
+ */
+
+/** Decimal places a location is rounded to before it becomes a key. */
+const LOCATION_PRECISION = 2;
+
+/**
+ * How many buckets locations are hashed into, fixed forever.
+ *
+ * The shard count is deployment configuration and changes; this does not. A
+ * bucket is therefore stable enough to store on the row, which is what lets
+ * the split be a `WHERE` clause the database can index instead of a filter
+ * applied after every instance has read the whole table.
+ *
+ * 1024 is well above any plausible shard count, so buckets stay evenly spread
+ * across shards even when the count does not divide it.
+ */
+export const LOCATION_BUCKETS = 1024;
+
+/**
+ * The key one upstream call covers. Triggers rounded to the same coordinates
+ * share a fetch, which is why the watcher groups by this rather than by
+ * trigger.
+ */
+export function locationKey(latitude: number, longitude: number): string {
+  return `${latitude.toFixed(LOCATION_PRECISION)}:${longitude.toFixed(
+    LOCATION_PRECISION,
+  )}`;
+}
+
+/**
+ * FNV-1a. Chosen for being stable across processes, restarts and languages —
+ * the only property that matters here, and the reason the backfill migration
+ * can reproduce it in PL/pgSQL.
+ */
+export function hashLocation(key: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= key.charCodeAt(i);
+    // `Math.imul`, not `*`. JavaScript multiplies as float64, and the FNV
+    // prime pushes the product past 2^53 immediately — which discards the low
+    // bits, the exact ones the modulo then reads. Written with `*` this
+    // distributed 400 locations across four shards as 360/9/25/6.
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
+/** The stored bucket for a coordinate pair. */
+export function locationBucket(latitude: number, longitude: number): number {
+  return hashLocation(locationKey(latitude, longitude)) % LOCATION_BUCKETS;
+}
+
+/**
+ * Which buckets an instance is responsible for.
+ *
+ * Enumerated rather than expressed as `bucket % count = index`, because a
+ * modulo on a column cannot use an index and the whole point of the bucket is
+ * to be selectable. At most `LOCATION_BUCKETS` values, which Postgres handles
+ * as an ordinary `IN` list.
+ */
+export function bucketsForShard(index: number, count: number): number[] {
+  const buckets: number[] = [];
+  for (let bucket = 0; bucket < LOCATION_BUCKETS; bucket++) {
+    if (bucket % count === index) {
+      buckets.push(bucket);
+    }
+  }
+  return buckets;
+}

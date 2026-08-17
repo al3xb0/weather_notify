@@ -17,7 +17,7 @@ jest.mock('@app/domain', () => ({
   evaluateConditions: jest.fn(),
 }));
 
-import { evaluateConditions, TriggerState } from '@app/domain';
+import { evaluateConditions, locationBucket, TriggerState } from '@app/domain';
 
 const evalMock = evaluateConditions as jest.Mock;
 
@@ -249,14 +249,30 @@ describe('WatcherService', () => {
 
     beforeEach(() => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
-      m.triggers.findActive.mockResolvedValue(
-        CITIES.map((c) => makeTrigger(c)),
+      // Stands in for the query, which is where the restriction now lives: the
+      // shard reads its own slice rather than reading everything and
+      // discarding most of it.
+      m.triggers.findActive.mockImplementation((buckets?: number[]) =>
+        Promise.resolve(
+          CITIES.filter(
+            (c) =>
+              !buckets ||
+              buckets.includes(locationBucket(c.latitude, c.longitude)),
+          ).map((c) => makeTrigger(c)),
+        ),
       );
     });
 
     it('polls everything when unsharded', async () => {
       await service.runCycle();
       expect(m.weather.getSnapshot).toHaveBeenCalledTimes(CITIES.length);
+    });
+
+    // An unrestricted query is the cheaper plan and the one that still returns
+    // rows written before the bucket column existed.
+    it('asks for no bucket restriction when unsharded', async () => {
+      await service.runCycle();
+      expect(m.triggers.findActive).toHaveBeenCalledWith(undefined);
     });
 
     it('takes only its own share, and the shares add up', async () => {

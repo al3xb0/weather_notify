@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/database';
+import { locationBucket } from '@app/domain';
 import { ConditionDto } from './dto/create-trigger.dto';
 
 const TRIGGER_INCLUDE = {
@@ -68,14 +69,13 @@ export class TriggersRepository {
     fields: Omit<Prisma.TriggerUncheckedCreateInput, 'userId' | 'conditions'>,
     conditions: ConditionDto[],
   ): Promise<TriggerRow> {
-    return this.prisma.trigger.create({
-      data: {
-        ...fields,
-        userId,
-        conditions: { create: conditionRows(conditions) },
-      },
-      include: TRIGGER_INCLUDE,
-    });
+    const data: Prisma.TriggerUncheckedCreateInput = {
+      ...fields,
+      userId,
+      locationBucket: locationBucket(fields.latitude, fields.longitude),
+      conditions: { create: conditionRows(conditions) },
+    };
+    return this.prisma.trigger.create({ data, include: TRIGGER_INCLUDE });
   }
 
   update(
@@ -87,6 +87,11 @@ export class TriggersRepository {
       where: { id },
       data: {
         ...fields,
+        // The bucket is derived from the coordinates, so it has to move with
+        // them. A row left on its old bucket is polled by the instance that
+        // owns where it *used* to be, alongside a location it no longer shares
+        // an upstream call with.
+        ...bucketPatch(fields),
         // Replace the whole condition set when a new one is provided.
         ...(conditions
           ? {
@@ -109,6 +114,23 @@ export class TriggersRepository {
     });
     return count;
   }
+}
+
+/**
+ * The bucket update for a patch that moves a trigger, and nothing for one that
+ * does not. Both coordinates are read from the patch when either is present:
+ * a bucket derived from a new latitude and a stale longitude belongs to a
+ * location that does not exist.
+ */
+function bucketPatch(
+  fields: Prisma.TriggerUpdateInput,
+): { locationBucket: number } | Record<string, never> {
+  const latitude = fields.latitude;
+  const longitude = fields.longitude;
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return {};
+  }
+  return { locationBucket: locationBucket(latitude, longitude) };
 }
 
 function conditionRows(conditions: ConditionDto[]) {
