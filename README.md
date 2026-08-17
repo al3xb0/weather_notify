@@ -145,7 +145,8 @@ stays. MIT licensed — see [CONTRIBUTING.md](CONTRIBUTING.md) to work on it and
 - **Input validation** — every DTO is validated (class-validator); IANA timezones and
   push endpoints are checked, and user-supplied text is HTML-escaped in outgoing emails.
 - **Fail-fast config** — environment is validated with zod at boot; secrets must be ≥ 32
-  chars and cannot be left as placeholders.
+  chars and cannot be left as placeholders. Grafana's admin password has no default
+  either: the compose file stops if it is unset.
 - **Least privilege** — Docker images run as a non-root user; infra ports bind to loopback.
 
 ## Tech stack

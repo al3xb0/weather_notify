@@ -311,8 +311,12 @@ services:
     restart: unless-stopped
     mem_limit: 384m
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # No fallback on purpose. This file is the deploy artifact, so a default
+      # here is not a convenience — it is the credential that ends up running,
+      # on the one service that puts the whole system on a screen. Unset or
+      # empty stops the stack here, where the message names the variable.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:?set GRAFANA_USER in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env}
       # Nothing here is meant to be reachable anonymously, and the instance sits
       # behind loopback anyway.
       GF_AUTH_ANONYMOUS_ENABLED: "false"

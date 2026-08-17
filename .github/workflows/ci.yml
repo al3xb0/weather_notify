@@ -85,6 +85,15 @@ jobs:
   # boots the real compose stack and asserts both.
   smoke:
     runs-on: ubuntu-latest
+
+    # Interpolated into the compose file, which has no default for these any
+    # more. The shell environment wins over .env, so setting them here is all
+    # that is needed — and a job that forgets to fails at `up` rather than at
+    # the Grafana assertions further down.
+    env:
+      GRAFANA_USER: admin
+      GRAFANA_PASSWORD: ci-grafana-password
+
     steps:
       - uses: actions/checkout@v4
 
@@ -210,8 +219,8 @@ jobs:
             curl -fsS http://localhost:3005/api/health >/dev/null 2>&1 && break
             sleep 3
           done
-          curl -fsS -u admin:admin http://localhost:3005/api/datasources | jq -e '.[0].type == "prometheus"'
-          curl -fsS -u admin:admin http://localhost:3005/api/search | jq -e '
+          curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASSWORD" http://localhost:3005/api/datasources | jq -e '.[0].type == "prometheus"'
+          curl -fsS -u "$GRAFANA_USER:$GRAFANA_PASSWORD" http://localhost:3005/api/search | jq -e '
             [.[] | select(.uid == "weather-notify-delivery")] | length == 1
           '
 
