@@ -49,4 +49,13 @@ envsubst '
   ${SMTP_REQUIRE_TLS} ${RECEIVER_BODY}
 ' < "$TEMPLATE" > "$RENDERED"
 
+# A rendered config Alertmanager rejects is a container that restarts forever
+# with the reason buried in a loop of identical logs. Say it once, plainly,
+# while the rendered file is still in front of us.
+if ! /bin/amtool check-config "$RENDERED" >/dev/null 2>&1; then
+  echo "alertmanager: the rendered config is not valid — refusing to start:" >&2
+  /bin/amtool check-config "$RENDERED" >&2 || true
+  exit 1
+fi
+
 exec /bin/alertmanager --config.file="$RENDERED" "$@"

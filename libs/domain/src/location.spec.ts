@@ -23,14 +23,26 @@ function ownerOf(
 }
 
 describe('locationKey', () => {
-  it('rounds to two decimals, which is what shares one upstream call', () => {
-    expect(locationKey(52.5201, 13.4055)).toBe('52.52:13.41');
-    expect(locationKey(52.5199, 13.4051)).toBe('52.52:13.41');
+  it('snaps to hundredths, which is what shares one upstream call', () => {
+    expect(locationKey(52.5201, 13.4055)).toBe('5252:1341');
+    expect(locationKey(52.5199, 13.4051)).toBe('5252:1341');
   });
 
   it('keeps the sign, so hemispheres do not collide', () => {
-    expect(locationKey(-33.87, 151.21)).toBe('-33.87:151.21');
+    expect(locationKey(-33.87, 151.21)).toBe('-3387:15121');
     expect(locationKey(-33.87, 151.21)).not.toBe(locationKey(33.87, 151.21));
+  });
+
+  /**
+   * Integers rather than `toFixed(2)`, because the same key is built in
+   * PL/pgSQL by the backfill migration. `toFixed` rounds the binary double —
+   * 13.405 is stored as 13.40499… and becomes "13.40" — while Postgres rounds
+   * the decimal half-up to "13.41". `test/bucket-parity.spec.ts` pins the
+   * agreement against values produced by the migration itself.
+   */
+  it('snaps a halfway value the same way twice', () => {
+    expect(locationKey(13.405, 13.405)).toBe('1341:1341');
+    expect(locationKey(-33.875, -33.875)).toBe('-3387:-3387');
   });
 });
 

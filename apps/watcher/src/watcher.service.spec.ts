@@ -340,11 +340,11 @@ describe('WatcherService', () => {
     it('fetches weather once for co-located triggers', async () => {
       evalMock.mockReturnValue({ matched: false, results: RESULTS });
       m.triggers.findActive.mockResolvedValue([
-        makeTrigger({ id: 'a', latitude: 52.521, longitude: 13.405 }),
+        makeTrigger({ id: 'a', latitude: 52.521, longitude: 13.401 }),
         makeTrigger({ id: 'b', latitude: 52.524, longitude: 13.4049 }),
       ]);
       await service.runCycle();
-      // Both round to 52.52:13.40 → single upstream call, two evaluations.
+      // Both snap to 5252:1340 → single upstream call, two evaluations.
       expect(m.weather.getSnapshot).toHaveBeenCalledTimes(1);
       expect(evalMock).toHaveBeenCalledTimes(2);
     });

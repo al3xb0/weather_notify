@@ -12,10 +12,13 @@ ALTER TABLE "Trigger" ADD COLUMN "locationBucket" INTEGER NOT NULL DEFAULT 0;
 CREATE OR REPLACE FUNCTION pg_temp.fnv1a_location(lat DOUBLE PRECISION, lon DOUBLE PRECISION)
 RETURNS BIGINT AS $$
 DECLARE
-  -- to_char with FM and a fixed scale matches Number.prototype.toFixed(2):
-  -- always two decimals, no padding, a leading minus where there is one.
-  key TEXT := to_char(lat::numeric, 'FM9999999990.00') || ':' ||
-              to_char(lon::numeric, 'FM9999999990.00');
+  -- Hundredths as integers, matching `locationKey`. Not a decimal rounding:
+  -- toFixed(2) rounds the binary double (13.405 is stored as 13.40499… and
+  -- becomes "13.40"), while Postgres would convert to numeric and round
+  -- half-up to "13.41" — two buckets for one location. floor(x * 100 + 0.5)
+  -- is the same rule over the same double on both sides.
+  key TEXT := floor(lat * 100 + 0.5)::BIGINT::TEXT || ':' ||
+              floor(lon * 100 + 0.5)::BIGINT::TEXT;
   hash BIGINT := 2166136261;
   i INTEGER;
 BEGIN

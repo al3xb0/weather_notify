@@ -8,8 +8,24 @@
  * silent way for a location to be claimed by nobody.
  */
 
-/** Decimal places a location is rounded to before it becomes a key. */
-const LOCATION_PRECISION = 2;
+/**
+ * Coordinates are snapped to hundredths — roughly a kilometre, which is well
+ * inside what one weather reading covers — and the key is built from those
+ * hundredths as integers.
+ *
+ * Integers rather than `toFixed(2)`, because the backfill migration has to
+ * produce the same key in PL/pgSQL and decimal rounding does not survive the
+ * trip. `toFixed` rounds the binary double, so 13.405 — stored as
+ * 13.40499999999999... — becomes "13.40", while Postgres converts to `numeric`
+ * first and rounds half-up to "13.41". Two languages, two buckets, one
+ * location. `floor(x * 100 + 0.5)` is one rule applied to the same double on
+ * both sides, and it agrees everywhere including the halfway cases.
+ */
+const LOCATION_SCALE = 100;
+
+function snap(value: number): number {
+  return Math.floor(value * LOCATION_SCALE + 0.5);
+}
 
 /**
  * How many buckets locations are hashed into, fixed forever.
@@ -30,9 +46,7 @@ export const LOCATION_BUCKETS = 1024;
  * trigger.
  */
 export function locationKey(latitude: number, longitude: number): string {
-  return `${latitude.toFixed(LOCATION_PRECISION)}:${longitude.toFixed(
-    LOCATION_PRECISION,
-  )}`;
+  return `${snap(latitude)}:${snap(longitude)}`;
 }
 
 /**
