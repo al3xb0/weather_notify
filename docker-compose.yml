@@ -239,6 +239,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # The loop dumps immediately on start, so without this the first backup of
+      # a fresh deployment races the migration and wins: a readable archive of a
+      # database with no tables, which is worse than no backup because it looks
+      # like one. On a daily interval that stays the only copy for a day.
+      migrate:
+        condition: service_completed_successfully
 
   # The services have exposed Prometheus metrics all along; nothing scraped
   # them, which made the whole metric surface a design rather than something
