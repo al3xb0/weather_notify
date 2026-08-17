@@ -152,6 +152,7 @@
   "overrides": {
     "@nestjs/swagger": {
       "js-yaml": "^5.2.3"
-    }
+    },
+    "deepmerge-ts": "^8.0.1"
   }
 }
