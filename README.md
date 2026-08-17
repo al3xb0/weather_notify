@@ -147,9 +147,19 @@ Redis · Passport/JWT · Open-Meteo · Nodemailer (SMTP) · web-push · Docker C
 ## Anti-spam design
 
 Each trigger has a state machine (`ARMED` → `FIRED`) plus a per-trigger `cooldownMin`.
-A trigger fires when the condition first becomes true (ARMED) and re-fires only after the
-cooldown elapses; when the condition clears it re-arms (hysteresis). This prevents a
-sustained condition (e.g. "temperature > 30 °C") from emitting an alert every cycle.
+The two answer different questions and both have to agree before an alert goes out.
+The state machine asks whether this is a *new* crossing: a trigger fires when the
+condition first becomes true, and re-arms once it clears (hysteresis), which is what
+stops a sustained condition — "temperature > 30 °C" through an August afternoon — from
+alerting every cycle. The cooldown asks how often a crossing may be *delivered*, and
+is measured from the last firing alone.
+
+Keeping the cooldown blind to the state is the part worth stating, because the
+obvious shortcut is wrong: letting ARMED mean "cooldown does not apply" reads fine
+until the condition oscillates around its threshold. Every clear re-arms it, so the
+gate is open on the next poll, and a temperature hovering at the limit delivers on
+every cycle against an hourly cooldown. Only `lastFiredAt` can answer "how long since
+the user last heard from us".
 
 The transition is a pure function in `libs/domain`:
 
