@@ -160,7 +160,10 @@ jobs:
         run: |
           set -euo pipefail
           docker compose exec -T db-backup /scripts/backup.sh once
-          dump=$(docker compose exec -T db-backup sh -c 'ls -1 /backups/*.dump | head -1' | tr -d '\r')
+          # Newest, by mtime. The sidecar has already written one on start, and
+          # `ls -1` sorts ascending — so taking the first file restored the older
+          # dump and left the one this step just produced unexercised.
+          dump=$(docker compose exec -T db-backup sh -c 'ls -1t /backups/*.dump | head -1' | tr -d '\r')
           [ -n "$dump" ] || { echo "no dump was written"; exit 1; }
 
           docker compose exec -T postgres \
