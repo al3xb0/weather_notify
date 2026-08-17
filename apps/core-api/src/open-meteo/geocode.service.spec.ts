@@ -1,8 +1,13 @@
 import { HttpService } from '@nestjs/axios';
 import { Test, TestingModule } from '@nestjs/testing';
+import { createHash } from 'node:crypto';
 import { of, throwError } from 'rxjs';
 import { RedisService } from '@app/common';
 import { GeocodeService } from './geocode.service';
+
+/** The key a normalised query lands on — a digest, never the query itself. */
+const keyFor = (normalised: string) =>
+  `geocode:${createHash('sha256').update(normalised).digest('hex')}`;
 
 const upstream = {
   results: [
@@ -73,7 +78,7 @@ describe('GeocodeService', () => {
       unknown,
       number,
     ];
-    expect(key).toBe('geocode:berlin');
+    expect(key).toBe(keyFor('berlin'));
     expect(value).toEqual([
       {
         name: 'Berlin',
@@ -92,7 +97,19 @@ describe('GeocodeService', () => {
     // The typing that produces these is the same search, and three entries for
     // it would mean three upstream calls where one would do.
     const [key] = redis.setJson.mock.calls[0] as [string];
-    expect(key).toBe('geocode:berlin');
+    expect(key).toBe(keyFor('berlin'));
+  });
+
+  /**
+   * The query is arbitrary caller input landing in a key with a 24-hour TTL.
+   * Interpolated verbatim it is an unbounded key length and a way to write
+   * whatever an operator later reads out of Redis.
+   */
+  it('keeps the caller string out of the key', async () => {
+    await service.search('*\r\nFLUSHALL\r\n'.repeat(50));
+
+    const [key] = redis.setJson.mock.calls[0] as [string];
+    expect(key).toMatch(/^geocode:[0-9a-f]{64}$/);
   });
 
   it('answers with no matches when the upstream is down, rather than failing', async () => {

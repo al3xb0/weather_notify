@@ -123,7 +123,15 @@ describe('RabbitConsumerService topology', () => {
   it('parks dead messages on a queue nothing consumes', async () => {
     await setup();
 
-    expect(queueArgs('notifications.email.dead')).toEqual({ durable: true });
+    expect(queueArgs('notifications.email.dead')).toEqual({
+      durable: true,
+      // Nothing drains this queue, so without a ceiling it grows for as long
+      // as whatever is failing keeps failing — and a broker out of disk stops
+      // delivery on every channel, not only the broken one.
+      maxLength: 10_000,
+      // Oldest out first: the newest failures are the ones worth reading.
+      overflow: 'drop-head',
+    });
     expect(bindingFor('notifications.email.dead')).toEqual([
       'notifications.email.dead',
       DLX_EXCHANGE,

@@ -182,12 +182,50 @@ describe('AdminService', () => {
       prisma.user.findUnique
         .mockResolvedValueOnce({ id: 'u1', role: 'ADMIN' })
         .mockResolvedValue(userDetail({ role: 'USER' }));
+      prisma.user.count.mockResolvedValue(1);
 
       await service.updateUser('u1', { role: 'USER' });
 
       // The role is signed into the access token, so without this a demoted
       // admin keeps the role until the token expires.
       expect(redis.revokeUserTokens).toHaveBeenCalledWith('u1', 900);
+    });
+
+    /**
+     * Every route in this module is behind the ADMIN role, so removing the
+     * only account that holds it locks the door from the inside: no bootstrap
+     * path, no self-service promotion, and the fix is an UPDATE against the
+     * production database.
+     */
+    it('refuses to demote the last administrator', async () => {
+      prisma.user.findUnique.mockResolvedValueOnce({ id: 'u1', role: 'ADMIN' });
+      prisma.user.count.mockResolvedValue(0);
+
+      await expect(
+        service.updateUser('u1', { role: 'USER' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses to delete the last administrator', async () => {
+      prisma.user.findUnique.mockResolvedValueOnce({ id: 'u2', role: 'ADMIN' });
+      prisma.user.count.mockResolvedValue(0);
+
+      await expect(service.deleteUser('u1', 'u2')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(prisma.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('allows demoting an admin while another one remains', async () => {
+      prisma.user.findUnique
+        .mockResolvedValueOnce({ id: 'u1', role: 'ADMIN' })
+        .mockResolvedValue(userDetail({ role: 'USER' }));
+      prisma.user.count.mockResolvedValue(2);
+
+      await expect(
+        service.updateUser('u1', { role: 'USER' }),
+      ).resolves.toBeDefined();
     });
 
     it('leaves tokens alone when the role is unchanged', async () => {

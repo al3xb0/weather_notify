@@ -1,5 +1,6 @@
 import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { firstValueFrom } from 'rxjs';
 import { z } from 'zod';
 import { getCounter, RedisService } from '@app/common';
@@ -100,8 +101,15 @@ export class GeocodeService {
    * Case- and whitespace-insensitive, so "Berlin", "berlin" and " berlin "
    * share one entry rather than three — the typing that produces them is the
    * same search.
+   *
+   * Hashed to a fixed width rather than interpolated. The query is arbitrary
+   * caller input reaching a key with a 24-hour TTL, so verbatim it is both an
+   * unbounded key length and a way to write whatever an operator later reads
+   * out of Redis. A digest is neither, and collisions at 256 bits are not a
+   * thing that happens.
    */
   private cacheKey(query: string): string {
-    return `geocode:${query.trim().toLowerCase()}`;
+    const normalised = query.trim().toLowerCase();
+    return `geocode:${createHash('sha256').update(normalised).digest('hex')}`;
   }
 }

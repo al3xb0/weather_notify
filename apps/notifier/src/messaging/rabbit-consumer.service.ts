@@ -37,6 +37,14 @@ const DEFAULT_RETRY_DELAYS_MS = [5_000, 30_000, 300_000];
 const DRAIN_TIMEOUT_MS = 30_000;
 const DRAIN_POLL_MS = 50;
 
+/**
+ * Ceiling on a dead queue. Far more than a healthy system parks in a week, and
+ * far less than it takes to fill a broker's disk — which is the failure this
+ * exists to prevent, and which would stop delivery on every channel rather
+ * than only the one that is broken.
+ */
+const DEFAULT_DEAD_QUEUE_MAX = 10_000;
+
 const retriesTotal = getCounter(
   'notifier_retries_total',
   'Total notification delivery retries by channel',
@@ -68,6 +76,7 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
 
   private readonly retryDelaysMs: number[];
   private readonly prefetch: number;
+  private readonly deadQueueMaxLength: number;
 
   private readonly consumerTags = new Map<Channel, string>();
   private inFlight = 0;
@@ -81,6 +90,10 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
       config.get<string>('NOTIFIER_RETRY_DELAYS_MS'),
     );
     this.prefetch = Number(config.get('NOTIFIER_PREFETCH') ?? 10);
+    this.deadQueueMaxLength = positiveInt(
+      config.get<string>('NOTIFIER_DEAD_QUEUE_MAX'),
+      DEFAULT_DEAD_QUEUE_MAX,
+    );
   }
 
   /** Total attempts before parking: the first try plus one per retry stage. */
@@ -139,9 +152,18 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Terminal parking. Nothing consumes it: messages sit here until someone
-      // inspects them and replays them onto the main exchange.
+      // inspects them and replays them onto the main exchange — which is
+      // exactly why it needs a ceiling. A queue nothing drains grows for as
+      // long as whatever is failing keeps failing, and the broker running out
+      // of disk takes down delivery for every channel, not just the broken
+      // one. Oldest out first: the newest failures are the ones still worth
+      // reading, and the count is what the alert watches anyway.
       const deadQueue = deadQueueNameFor(channel);
-      await ch.assertQueue(deadQueue, { durable: true });
+      await ch.assertQueue(deadQueue, {
+        durable: true,
+        maxLength: this.deadQueueMaxLength,
+        overflow: 'drop-head',
+      });
       await ch.bindQueue(deadQueue, DLX_EXCHANGE, deadRoutingKeyFor(channel));
 
       const { consumerTag } = await ch.consume(queue, (msg) => {
@@ -318,6 +340,12 @@ export class RabbitConsumerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('All in-flight deliveries drained');
     }
   }
+}
+
+/** A positive integer from the environment, or the default for anything else. */
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseDelays(raw: string | undefined): number[] {

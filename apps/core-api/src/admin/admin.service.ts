@@ -145,6 +145,9 @@ export class AdminService {
     dto: UpdateUserDto,
   ): Promise<AdminUserDetailDto> {
     const current = await this.assertExists(id);
+    if (current.role === 'ADMIN' && dto.role === 'USER') {
+      await this.assertNotTheLastAdmin(id);
+    }
     await this.prisma.user.update({
       where: { id },
       data: {
@@ -170,7 +173,10 @@ export class AdminService {
     if (actingUserId === id) {
       throw new BadRequestException('You cannot delete your own account here');
     }
-    await this.assertExists(id);
+    const { role } = await this.assertExists(id);
+    if (role === 'ADMIN') {
+      await this.assertNotTheLastAdmin(id);
+    }
     // Triggers, notifications, pinned cities and sessions cascade at the DB.
     await this.prisma.user.delete({ where: { id } });
     // Access tokens do not cascade — they are stateless and stay valid for
@@ -186,6 +192,26 @@ export class AdminService {
       throw new NotFoundException('Trigger not found');
     }
     return { id };
+  }
+
+  /**
+   * Refuse to remove the last account that can reach this module.
+   *
+   * Every route here is behind the ADMIN role, so demoting or deleting the
+   * only admin locks the door from the inside: there is no bootstrap path and
+   * no self-service promotion, and the fix is an UPDATE against the production
+   * database. Both callers reach it having already read the target's role, so
+   * this only asks whether anyone else holds it.
+   */
+  private async assertNotTheLastAdmin(id: string): Promise<void> {
+    const others = await this.prisma.user.count({
+      where: { role: 'ADMIN', id: { not: id } },
+    });
+    if (others === 0) {
+      throw new BadRequestException(
+        'This is the last administrator — promote another account first',
+      );
+    }
   }
 
   /** Returns the row's current role, which `updateUser` compares against. */
