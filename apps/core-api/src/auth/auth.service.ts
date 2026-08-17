@@ -126,8 +126,14 @@ export class AuthService {
    * Begin a password reset. Answers the same way for a known and an unknown
    * address: the route is unauthenticated, so anything that varied with the
    * account's existence — status, body, or a materially different response
-   * time — would make it an enumeration oracle. The work for an unknown address
-   * is a lookup either way, and the throttler bounds the rest.
+   * time — would make it an enumeration oracle.
+   *
+   * The mail is handed off rather than awaited, and that is the part that makes
+   * the timing claim true. An SMTP handshake takes hundreds of milliseconds,
+   * so waiting for it put the known-address path an order of magnitude behind
+   * the unknown one and turned the response time into the oracle the body and
+   * the status were written to avoid. What is left is one extra UPDATE, which
+   * is inside the noise of a network round-trip. The throttler bounds the rest.
    */
   async forgotPassword(email: string): Promise<{ accepted: boolean }> {
     const user = await this.users.findByEmail(email);
@@ -146,28 +152,44 @@ export class AuthService {
       },
     });
     const link = `${this.frontUrl}/reset-password?token=${token}`;
-    if (!this.mail.configured) {
-      // Dev fallback, matching the verification path: surface the link in logs
-      // when no mailer is configured.
-      this.logger.warn(`Mailer disabled; reset link for ${email}: ${link}`);
-      return { accepted: true };
-    }
-    try {
-      await this.mail.send({
+    this.sendDetached(
+      {
         to: email,
         subject: 'Reset your password',
         html:
           `<p>Reset your password by clicking <a href="${link}">this link</a>. It expires in one hour.</p>` +
           `<p>If you did not ask for this, ignore this email — your password has not changed.</p>`,
-      });
-    } catch (err) {
-      // The caller is told nothing either way, so a mailer failure must at
+      },
+      `reset link for ${email}: ${link}`,
+    );
+    return { accepted: true };
+  }
+
+  /**
+   * Send without holding the request open, logging whatever happens.
+   *
+   * Nothing about the response depends on the outcome — every caller answers
+   * the same whether the mail lands or not — so awaiting only spends the
+   * user's latency, and on the reset path it also leaks which addresses exist.
+   * A dropped mail during a shutdown is recoverable by asking again, which is
+   * the same recovery a failed send already had.
+   */
+  private sendDetached(
+    message: { to: string; subject: string; html: string },
+    devFallback: string,
+  ): void {
+    if (!this.mail.configured) {
+      // Dev fallback: surface the link in logs when no mailer is configured.
+      this.logger.warn(`Mailer disabled; ${devFallback}`);
+      return;
+    }
+    void this.mail.send(message).catch((err: unknown) => {
+      // The caller was told nothing either way, so a mailer failure must at
       // least be visible here.
       this.logger.error(
-        `Failed to send password reset email to ${email}: ${String(err)}`,
+        `Failed to send "${message.subject}" to ${message.to}: ${String(err)}`,
       );
-    }
-    return { accepted: true };
+    });
   }
 
   /**
@@ -229,25 +251,16 @@ export class AuthService {
       },
     });
     const link = `${this.frontUrl}/verify-email?token=${token}`;
-    if (!this.mail.configured) {
-      // Dev fallback: surface the link in logs when no mailer is configured.
-      this.logger.warn(
-        `Mailer disabled; verification link for ${email}: ${link}`,
-      );
-      return;
-    }
-    try {
-      await this.mail.send({
+    // Never block registration on the mailer — the gate is soft, so the
+    // account is usable before the mail lands either way.
+    this.sendDetached(
+      {
         to: email,
         subject: 'Verify your email',
         html: `<p>Confirm your email address by clicking <a href="${link}">this link</a>. It expires in 24 hours.</p>`,
-      });
-    } catch (err) {
-      // Never block registration on a mailer hiccup — soft gate.
-      this.logger.error(
-        `Failed to send verification email to ${email}: ${String(err)}`,
-      );
-    }
+      },
+      `verification link for ${email}: ${link}`,
+    );
   }
 
   /**

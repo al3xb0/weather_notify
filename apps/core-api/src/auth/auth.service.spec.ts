@@ -576,6 +576,32 @@ describe('AuthService', () => {
         { accepted: true },
       );
     });
+
+    /**
+     * The identical body and status are only half the defence. An SMTP
+     * handshake costs hundreds of milliseconds, so awaiting it made the
+     * known-address path measurably slower than the unknown one and put the
+     * oracle back in the response time.
+     */
+    it('does not wait for the mailer, which only the known address reaches', async () => {
+      users.findByEmail.mockResolvedValue({
+        id: 'u1',
+        email: 'user@example.com',
+      });
+      let deliver!: () => void;
+      mail.send.mockReturnValue(
+        new Promise<void>((resolve) => {
+          deliver = resolve;
+        }),
+      );
+
+      await expect(service.forgotPassword('user@example.com')).resolves.toEqual(
+        { accepted: true },
+      );
+
+      expect(mail.send).toHaveBeenCalled();
+      deliver();
+    });
   });
 
   describe('resetPassword', () => {
