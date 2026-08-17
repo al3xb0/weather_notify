@@ -3,8 +3,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
+import { Prisma, Role } from '@prisma/client';
+import { RedisService } from '@app/common';
 import { PrismaService } from '@app/database';
+import { DEFAULT_ACCESS_TTL, parseDurationMs } from '../auth/duration';
 import { PaginatedResult, PaginationDto } from '../common/dto/pagination.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import {
@@ -20,7 +23,20 @@ const TRIGGER_INCLUDE = {
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  /** Matches the access token's lifetime — see `deleteUser`. */
+  private readonly accessTtlSec: number;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+    config: ConfigService,
+  ) {
+    this.accessTtlSec = Math.ceil(
+      parseDurationMs(
+        config.get<string>('JWT_ACCESS_TTL') ?? DEFAULT_ACCESS_TTL,
+      ) / 1000,
+    );
+  }
 
   async stats(): Promise<AdminStatsDto> {
     const [
@@ -128,7 +144,7 @@ export class AdminService {
     id: string,
     dto: UpdateUserDto,
   ): Promise<AdminUserDetailDto> {
-    await this.assertExists(id);
+    const current = await this.assertExists(id);
     await this.prisma.user.update({
       where: { id },
       data: {
@@ -138,6 +154,15 @@ export class AdminService {
           : {}),
       },
     });
+    if (dto.role && dto.role !== current.role) {
+      // The role is signed into the access token so guards can authorize
+      // without a database round-trip. That makes a demotion advisory until
+      // the token expires — an admin stripped of the role would keep it for
+      // another fifteen minutes, which is not what the person clicking the
+      // button believes they did. Denying the outstanding tokens forces the
+      // next request through refresh, which re-reads the role.
+      await this.redis.revokeUserTokens(id, this.accessTtlSec);
+    }
     return this.getUser(id);
   }
 
@@ -148,6 +173,10 @@ export class AdminService {
     await this.assertExists(id);
     // Triggers, notifications, pinned cities and sessions cascade at the DB.
     await this.prisma.user.delete({ where: { id } });
+    // Access tokens do not cascade — they are stateless and stay valid for
+    // their full lifetime, against rows that no longer exist. Same reasoning
+    // as self-deletion in UsersService.
+    await this.redis.revokeUserTokens(id, this.accessTtlSec);
     return { id };
   }
 
@@ -159,13 +188,15 @@ export class AdminService {
     return { id };
   }
 
-  private async assertExists(id: string): Promise<void> {
+  /** Returns the row's current role, which `updateUser` compares against. */
+  private async assertExists(id: string): Promise<{ role: Role }> {
     const exists = await this.prisma.user.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, role: true },
     });
     if (!exists) {
       throw new NotFoundException('User not found');
     }
+    return { role: exists.role };
   }
 }
