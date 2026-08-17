@@ -21,8 +21,14 @@ import { OutboxRelayService } from './outbox/outbox-relay.service';
 import type { OutboxFlusher } from './ports/outbox.repository';
 import { WEATHER_PROVIDER } from './ports/weather-provider.port';
 import type { WeatherProvider } from './ports/weather-provider.port';
+import { ownsLocation, shardFromEnv, type ShardConfig } from './sharding';
 
-const CYCLE_LOCK_KEY = 'watcher:cycle:lock';
+// One lock per shard rather than one for the whole service: two instances
+// holding different shards must run at the same time — that is the point —
+// while two instances configured with the *same* shard still must not overlap,
+// which is what a redeploy briefly produces.
+const cycleLockKey = ({ index, count }: ShardConfig): string =>
+  count > 1 ? `watcher:cycle:lock:${index}` : 'watcher:cycle:lock';
 // Auto-expires if a cycle dies without releasing. Deliberately shorter than a
 // cycle may run for: locations are polled one after another, so a long trigger
 // set outlives any fixed TTL, and the cycle renews the lock as it goes instead.
@@ -53,6 +59,11 @@ type EvaluatedWatchedCondition = EvaluatedCondition<WatchedCondition>;
 @Injectable()
 export class WatcherService {
   private readonly logger = new Logger(WatcherService.name);
+  /**
+   * Which slice of the trigger set this instance owns. Defaults to all of it,
+   * so a single-instance deployment behaves exactly as before.
+   */
+  private readonly shard: ShardConfig = shardFromEnv();
 
   constructor(
     @Inject(WATCHED_TRIGGER_REPOSITORY)
@@ -73,11 +84,10 @@ export class WatcherService {
     name: 'weather-poll',
   })
   async runCycle(): Promise<void> {
-    // Distributed lock so a slow cycle never overlaps with the next tick.
-    const token = await this.redis.acquireLock(
-      CYCLE_LOCK_KEY,
-      CYCLE_LOCK_TTL_SEC,
-    );
+    // Distributed lock so a slow cycle never overlaps with the next tick — per
+    // shard, so instances holding different shards do run concurrently.
+    const lockKey = cycleLockKey(this.shard);
+    const token = await this.redis.acquireLock(lockKey, CYCLE_LOCK_TTL_SEC);
     if (!token) {
       this.logger.warn('Previous cycle still running — skipping this tick');
       return;
@@ -87,7 +97,7 @@ export class WatcherService {
       await this.poll(token);
     } finally {
       endTimer();
-      const released = await this.redis.releaseLock(CYCLE_LOCK_KEY, token);
+      const released = await this.redis.releaseLock(lockKey, token);
       if (!released) {
         this.logger.warn(
           'Cycle lock expired before release — cycle exceeded its TTL',
@@ -103,11 +113,20 @@ export class WatcherService {
     }
 
     const byLocation = this.groupByLocation(triggers);
+    // Whole locations, never individual triggers: a location is what one
+    // upstream call covers, so splitting one across instances would fetch the
+    // same coordinates twice and undo the deduplication.
+    const mine = [...byLocation.entries()].filter(([key]) =>
+      ownsLocation(key, this.shard),
+    );
     this.logger.log(
-      `Polling ${byLocation.size} location(s) for ${triggers.length} trigger(s)`,
+      this.shard.count > 1
+        ? `Polling ${mine.length} of ${byLocation.size} location(s) ` +
+            `(shard ${this.shard.index + 1}/${this.shard.count}) for ${triggers.length} trigger(s)`
+        : `Polling ${byLocation.size} location(s) for ${triggers.length} trigger(s)`,
     );
 
-    for (const group of byLocation.values()) {
+    for (const [, group] of mine) {
       // Renewed per location, which is the unit of work that can stall: one
       // upstream call plus its retry. A cycle slower than the TTL would
       // otherwise hand the next tick a free lock and run alongside it.
@@ -140,7 +159,7 @@ export class WatcherService {
   private async renewLock(token: string): Promise<boolean> {
     try {
       return await this.redis.extendLock(
-        CYCLE_LOCK_KEY,
+        cycleLockKey(this.shard),
         token,
         CYCLE_LOCK_TTL_SEC,
       );

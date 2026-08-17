@@ -470,13 +470,23 @@ gate, and the smoke job.
 
 Honest list of what would break first, and what it would take.
 
-**The watcher is a single instance.** Concurrency is prevented by a Redis lock
-rather than by design, so a second instance would idle instead of sharing load.
-The lock is renewed per location as the cycle walks them, because a cycle that
-polls locations one at a time outlives any fixed TTL once the trigger set grows,
-and an expired lock is an invitation for the next tick to run alongside it.
-Sharding by a hash of the location would let instances split the trigger set with
-no coordination, since triggers are already grouped by location.
+**The watcher scales by sharding, and each shard is still single-instance.**
+Set `WATCHER_SHARD_COUNT` and give each replica its own `WATCHER_SHARD_INDEX`:
+an instance owns a location when `hash(location) % count == index`, which needs
+no leader, no rebalancing protocol and no shared state beyond the count. Whole
+locations are assigned, never individual triggers — a location is what one
+upstream call covers, so splitting one would fetch the same coordinates twice.
+
+The Redis lock stays, one per shard: instances holding different shards run
+concurrently, while two configured with the *same* shard still cannot overlap —
+which is what a redeploy briefly produces. It is renewed per location as the
+cycle walks them, because a cycle that polls locations one at a time outlives
+any fixed TTL once the trigger set grows.
+
+Rebalancing is the part that is not solved: changing `WATCHER_SHARD_COUNT`
+reassigns most locations at once, so a rolling change has a window where a
+location is owned by two instances or by none. Restarting the watchers together
+is the honest answer at this size; consistent hashing is what removes it.
 
 **Telegram polling is single-instance too, but core-api is not.** The API scales
 horizontally; `getUpdates`, which Telegram refuses to serve to two pollers at

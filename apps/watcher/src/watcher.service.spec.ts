@@ -221,6 +221,87 @@ describe('WatcherService', () => {
     });
   });
 
+  describe('sharding', () => {
+    const shardedService = (index: number, count: number) => {
+      const previous = { ...process.env };
+      process.env.WATCHER_SHARD_INDEX = String(index);
+      process.env.WATCHER_SHARD_COUNT = String(count);
+      // The shard is read when the service is constructed, so it has to be
+      // built inside the modified environment.
+      const built = new WatcherService(
+        m.triggers,
+        m.weather,
+        m.outbox,
+        m.redis as never,
+      );
+      process.env = previous;
+      return built;
+    };
+
+    const CITIES = [
+      { id: 'a', latitude: 52.52, longitude: 13.4 },
+      { id: 'b', latitude: 48.13, longitude: 11.57 },
+      { id: 'c', latitude: 41.39, longitude: 2.16 },
+      { id: 'd', latitude: 59.33, longitude: 18.07 },
+      { id: 'e', latitude: 45.46, longitude: 9.19 },
+      { id: 'f', latitude: 38.72, longitude: -9.14 },
+    ];
+
+    beforeEach(() => {
+      evalMock.mockReturnValue({ matched: false, results: RESULTS });
+      m.triggers.findActive.mockResolvedValue(
+        CITIES.map((c) => makeTrigger(c)),
+      );
+    });
+
+    it('polls everything when unsharded', async () => {
+      await service.runCycle();
+      expect(m.weather.getSnapshot).toHaveBeenCalledTimes(CITIES.length);
+    });
+
+    it('takes only its own share, and the shares add up', async () => {
+      const shards = [0, 1, 2].map((i) => shardedService(i, 3));
+      const polled: string[] = [];
+
+      for (const shard of shards) {
+        m.weather.getSnapshot.mockClear();
+        await shard.runCycle();
+        for (const [lat, lon] of m.weather.getSnapshot.mock.calls as [
+          number,
+          number,
+        ][]) {
+          polled.push(`${lat}:${lon}`);
+        }
+      }
+
+      // Every city polled exactly once across the three instances: a location
+      // owned by nobody is never evaluated, one owned twice is a duplicate
+      // upstream call and a duplicate alert.
+      expect(polled).toHaveLength(CITIES.length);
+      expect(new Set(polled).size).toBe(CITIES.length);
+    });
+
+    it('locks per shard, so instances do not block each other', async () => {
+      await shardedService(2, 4).runCycle();
+
+      // One lock for the whole service would make a second instance skip its
+      // tick entirely, which is the behaviour sharding replaces.
+      expect(m.redis.acquireLock).toHaveBeenCalledWith(
+        'watcher:cycle:lock:2',
+        expect.any(Number),
+      );
+    });
+
+    it('keeps the original lock key when unsharded', async () => {
+      await service.runCycle();
+
+      expect(m.redis.acquireLock).toHaveBeenCalledWith(
+        'watcher:cycle:lock',
+        expect.any(Number),
+      );
+    });
+  });
+
   describe('firing state machine', () => {
     async function process(trigger: WatchedTrigger): Promise<void> {
       m.triggers.findActive.mockResolvedValue([trigger]);
