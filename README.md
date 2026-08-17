@@ -581,6 +581,14 @@ Runs 24/7 for free on an **Oracle Cloud Always Free** ARM VM via `docker compose
 (`APP` build arg) and run as a non-root user. See `weather_notify_web` for the matching
 frontend deploy (Vercel).
 
+**The public edge is versioned too.** Every port in `docker-compose.yml` binds to
+loopback; TLS is terminated by a host-level Caddy whose config is
+[`ops/caddy/Caddyfile`](ops/caddy/Caddyfile) — the API is the only thing proxied, and
+Grafana and Prometheus stay behind an SSH tunnel. Because the UI is on a different site
+than the API, that deploy also needs `COOKIE_SAMESITE="none"` (the refresh cookie is not
+sent cross-site under `lax`) and the UI's origin in `CORS_ORIGIN`. Both are stated in the
+core-api boot log, so the running configuration is readable rather than assumed.
+
 ---
 
 Created by [Aliaksei Konyshau](https://www.al-gres.com/).
