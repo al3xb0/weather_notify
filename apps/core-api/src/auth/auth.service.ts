@@ -361,8 +361,21 @@ export class AuthService {
     return { success: true };
   }
 
-  // Refresh tokens are single-use and short-lived; revoked/expired rows are
-  // dead weight, so sweep them daily to keep the table bounded.
+  /**
+   * Keep the table bounded by sweeping rows that can no longer be presented.
+   *
+   * Expiry alone, deliberately. Sweeping revoked rows as well looks like the
+   * same statement and quietly disables reuse detection: a revoked row *is* the
+   * record that a token was already spent, and `refresh` reads its absence as
+   * "never issued" — an ordinary 401, with no family revocation. A leaked token
+   * replayed after the sweep therefore cost the attacker nothing and told us
+   * nothing, once a day, for every token rotated before midnight.
+   *
+   * A revoked row stops being useful when the token it fingerprints expires,
+   * because from then on `refresh` rejects it on the expiry check regardless.
+   * That is the same bound the row's own `expiresAt` gives, so nothing needs a
+   * second retention rule.
+   */
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { name: 'refresh-token-prune' })
   async pruneStaleTokens(): Promise<void> {
     // Every replica runs this cron. The delete is idempotent, so the lock is
@@ -378,7 +391,7 @@ export class AuthService {
     }
     try {
       const { count } = await this.prisma.refreshToken.deleteMany({
-        where: { OR: [{ revoked: true }, { expiresAt: { lt: new Date() } }] },
+        where: { expiresAt: { lt: new Date() } },
       });
       if (count > 0) {
         this.logger.log(`Pruned ${count} stale refresh token(s)`);

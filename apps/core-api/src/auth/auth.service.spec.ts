@@ -716,22 +716,36 @@ describe('AuthService', () => {
   });
 
   describe('pruneStaleTokens', () => {
-    it('sweeps revoked and expired rows only', async () => {
+    it('sweeps expired rows', async () => {
       prisma.refreshToken.deleteMany.mockResolvedValue({ count: 3 });
 
       await service.pruneStaleTokens();
 
       const [{ where }] = prisma.refreshToken.deleteMany.mock.calls[0] as [
-        { where: { OR: unknown[] } },
+        { where: Record<string, unknown> },
       ];
-      expect(where.OR).toEqual([
-        { revoked: true },
-        { expiresAt: { lt: expect.any(Date) } },
-      ]);
+      expect(where).toEqual({ expiresAt: { lt: expect.any(Date) } });
       expect(redis.releaseLock).toHaveBeenCalledWith(
         'core-api:refresh-tokens:prune',
         'lock-token',
       );
+    });
+
+    /**
+     * A revoked row is the record that its token was already spent, and it is
+     * the only thing `refresh` has to tell a replay from a token that never
+     * existed. Sweeping revoked rows alongside expired ones therefore switched
+     * reuse detection off once a day for everything rotated before midnight.
+     */
+    it('keeps revoked rows, which are what reuse detection reads', async () => {
+      prisma.refreshToken.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.pruneStaleTokens();
+
+      const [{ where }] = prisma.refreshToken.deleteMany.mock.calls[0] as [
+        { where: Record<string, unknown> },
+      ];
+      expect(JSON.stringify(where)).not.toContain('revoked');
     });
 
     // Every replica runs the cron; one full-table delete is enough.
