@@ -185,6 +185,24 @@ jobs:
           curl -fsS 'http://localhost:9090/api/v1/rules' \
             | jq -e '[.data.groups[].rules[] | select(.name == "OutboxBacklogGrowing")] | length == 1'
 
+      # A rule that fires and reaches nobody is the failure the alerting stack
+      # exists to prevent, and it looks exactly like a healthy system. This
+      # asserts Prometheus actually discovered Alertmanager and that
+      # Alertmanager parsed its rendered config.
+      - name: Prometheus is wired to Alertmanager
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            curl -fsS http://localhost:9093/-/ready >/dev/null 2>&1 && break
+            sleep 3
+          done
+          curl -fsS 'http://localhost:9090/api/v1/alertmanagers' \
+            | jq -e '.data.activeAlertmanagers | length == 1'
+          # The route tree comes from the template that entrypoint.sh renders,
+          # so this also proves the substitution produced valid YAML.
+          curl -fsS 'http://localhost:9093/api/v2/status' \
+            | jq -e '.config.original | contains("group_by")'
+
       - name: Grafana provisions its datasource and dashboard
         run: |
           set -euo pipefail

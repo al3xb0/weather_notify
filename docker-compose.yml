@@ -222,6 +222,34 @@ services:
     depends_on:
       core-api:
         condition: service_started
+      alertmanager:
+        condition: service_started
+
+  # Prometheus decides an alert is firing; this decides who hears about it.
+  # Without it the rules were a dashboard nobody was watching at 3am.
+  alertmanager:
+    build:
+      context: ./ops/alertmanager
+    container_name: wn_alertmanager
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      # A webhook wins when both are set — Slack, Discord, Telegram or anything
+      # that accepts a POST. Email falls back to the same SMTP credentials the
+      # application already uses for verification mail.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+    volumes:
+      - alertmanagerdata:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
 
   grafana:
     image: grafana/grafana:11.5.1
@@ -251,3 +279,4 @@ volumes:
   backups:
   promdata:
   grafanadata:
+  alertmanagerdata:

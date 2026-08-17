@@ -318,12 +318,35 @@ instead of publishing an unauthenticated query interface.
 |-------|------|
 | Grafana | <http://127.0.0.1:3005> (`GRAFANA_USER`/`GRAFANA_PASSWORD`) |
 | Prometheus | <http://127.0.0.1:9090> |
+| Alertmanager | <http://127.0.0.1:9093> |
 
 The rules page on what the system cannot recover from by itself — a service
 that stays unscraped, an outbox backlog that is not draining, sustained
 dead-lettering, a channel failing the majority of its deliveries, a poll cycle
-outgrowing its interval. Anything the retry ladder or the relay already absorbs
-is a graph, not a page.
+outgrowing its interval, a queue backing up. Anything the retry ladder or the
+relay already absorbs is a graph, not a page.
+
+### Where an alert goes
+
+Prometheus decides an alert is firing; **Alertmanager** decides who hears about
+it. Set `ALERT_WEBHOOK_URL` (Slack, Discord, Telegram — anything that accepts a
+POST) or `ALERT_EMAIL_TO`, which reuses the SMTP credentials the application
+already has. A webhook wins when both are set. With neither, alerts still fire
+and are visible in the UI but reach nobody — and the container says so loudly
+at startup rather than looking like a system with no alerts.
+
+Routing is where the noise is controlled, and three rules do most of it.
+Alerts group by name and service, so an incident that trips several rules
+arrives as one message. `critical` skips the group timer and repeats hourly;
+`info` is deliberately routed to a receiver that notifies nobody, because
+"the cache hit ratio is low" is a graph. An inhibit rule drops warnings for a
+service already reporting `critical` — a process that is down will also stop
+reporting its queue depth, and sending the consequence next to the cause is how
+one failure becomes a wall of pages.
+
+Alertmanager expands no environment variables in its config, so the container
+renders `alertmanager.tmpl.yml` at startup. CI asserts Prometheus discovered it
+and that the rendered config parsed.
 
 | Metric | Labels | Answers |
 |--------|--------|---------|
@@ -485,10 +508,11 @@ one origin.
 joined against, and read as one paginated list. It will outgrow the tables the API
 actually queries; the natural move is a separate store with a retention policy.
 
-**Alerts have nowhere to go.** Prometheus evaluates the rules and shows them
-firing, but no Alertmanager is wired up, so nothing routes them to a person.
-That is a receiver and a webhook away, and deliberately left out here rather
-than committed with a placeholder nobody would notice was pointing nowhere.
+**Alert delivery is only as good as its channel.** Alertmanager routes to a
+webhook or to email, both of which are the same kind of thing the notifier
+already depends on — if SMTP is what is broken, the alert about SMTP will not
+arrive either. A second, independent channel (a pager service, an SMS gateway)
+is the standard answer and is not wired up here.
 
 ## Deployment
 

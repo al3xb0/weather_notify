@@ -12,6 +12,15 @@ global:
 rule_files:
   - /etc/prometheus/alerts.yml
 
+# Evaluating a rule and routing it to a person are separate jobs: Prometheus
+# decides an alert is firing, Alertmanager decides who hears about it, groups
+# the related ones and stops a cause and its consequences arriving as two
+# pages.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
 scrape_configs:
   - job_name: core-api
     static_configs:
