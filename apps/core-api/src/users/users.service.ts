@@ -4,8 +4,11 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
+import { RedisService } from '@app/common';
+import { DEFAULT_ACCESS_TTL, parseDurationMs } from '../auth/duration';
 import { PrismaService } from '@app/database';
 import { User } from '@prisma/client';
 import {
@@ -25,7 +28,20 @@ const TELEGRAM_LINK_TTL_MS = 15 * 60 * 1000;
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  /** Matches the access token's lifetime — see `deleteAccount`. */
+  private readonly accessTtlSec: number;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+    config: ConfigService,
+  ) {
+    this.accessTtlSec = Math.ceil(
+      parseDurationMs(
+        config.get<string>('JWT_ACCESS_TTL') ?? DEFAULT_ACCESS_TTL,
+      ) / 1000,
+    );
+  }
 
   findByEmail(email: string): Promise<User | null> {
     return this.prisma.user.findUnique({ where: { email } });
@@ -197,6 +213,11 @@ export class UsersService {
       }
     }
     await this.prisma.user.delete({ where: { id: userId } });
+    // The refresh tokens went with the row, but access tokens are stateless
+    // and stay valid for their full lifetime — and every request they make now
+    // points at rows that do not exist, which surfaces as a 500 rather than as
+    // being signed out. Deny them for exactly as long as they could live.
+    await this.redis.revokeUserTokens(userId, this.accessTtlSec);
     return { success: true };
   }
 }

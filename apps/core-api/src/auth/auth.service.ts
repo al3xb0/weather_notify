@@ -17,6 +17,7 @@ import { MetricsService } from '../metrics/metrics.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshPayload, Tokens } from './types';
+import { DEFAULT_ACCESS_TTL, parseDurationMs } from './duration';
 
 const BCRYPT_ROUNDS = 12;
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -49,7 +50,7 @@ export class AuthService {
     this.refreshSecret = config.getOrThrow<string>('JWT_REFRESH_SECRET');
     // Parse at boot so a malformed TTL fails fast instead of silently widening.
     this.accessTtlMs = parseDurationMs(
-      config.get<string>('JWT_ACCESS_TTL') ?? '15m',
+      config.get<string>('JWT_ACCESS_TTL') ?? DEFAULT_ACCESS_TTL,
     );
     this.refreshTtlMs = parseDurationMs(
       config.get<string>('JWT_REFRESH_TTL') ?? '7d',
@@ -411,17 +412,4 @@ function verifyTokenHash(token: string, stored: string): boolean {
     return false;
   }
   return timingSafeEqual(expected, actual);
-}
-
-/** Parse a JWT-style duration string (e.g. "15m", "7d") into milliseconds. */
-function parseDurationMs(value: string): number {
-  const match = /^(\d+)([smhd])$/.exec(value.trim());
-  if (!match) {
-    throw new Error(
-      `Invalid JWT duration "${value}" — expected a value like "15m" or "7d"`,
-    );
-  }
-  const amount = Number(match[1]);
-  const unit = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]]!;
-  return amount * unit;
 }

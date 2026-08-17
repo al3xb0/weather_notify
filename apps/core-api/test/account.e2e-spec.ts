@@ -216,5 +216,27 @@ describe('Account lifecycle (e2e)', () => {
         await prisma.refreshToken.count({ where: { userId: user!.id } }),
       ).toBe(0);
     });
+
+    it('refuses the access token that outlived the account', async () => {
+      // The token is still cryptographically valid and unexpired — nothing in
+      // it changed when the row went away. Without the deny marker these calls
+      // reach foreign keys that no longer resolve and answer 500.
+      await request(app.getHttpServer())
+        .get('/users/me')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/pinned-cities')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ name: 'Berlin', latitude: 52.52, longitude: 13.405 })
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .patch('/users/me')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ timezone: 'Europe/Berlin' })
+        .expect(401);
+    });
   });
 });

@@ -71,6 +71,35 @@ export class RedisService implements OnModuleDestroy {
   }
 
   /**
+   * Deny every access token already issued to a user.
+   *
+   * Access tokens are stateless and short-lived, which is what makes them
+   * cheap — nothing is consulted to accept one. That is fine until the account
+   * behind a live token stops existing, and the difference between a stale
+   * token and a valid one has to be visible somewhere. The TTL should be the
+   * access-token lifetime: after that the token expires on its own and the key
+   * is dead weight.
+   */
+  async revokeUserTokens(userId: string, ttlSec: number): Promise<void> {
+    await this.client.set(revokedKey(userId), '1', 'EX', ttlSec);
+  }
+
+  /**
+   * Whether this user's tokens were denied. **Fails open**: an unreachable
+   * Redis answers "not revoked" rather than rejecting every authenticated
+   * request in the system. The window it leaves is bounded by the access
+   * token's own lifetime, which is the same window that exists without this
+   * mechanism at all — so a Redis outage costs the improvement, not the API.
+   */
+  async isUserRevoked(userId: string): Promise<boolean> {
+    try {
+      return (await this.client.exists(revokedKey(userId))) === 1;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Acquire a fenced lock: returns a unique token when the key was free, else
    * null. The token must be passed back to releaseLock so a slow holder cannot
    * delete a lock another instance has since acquired.
@@ -121,4 +150,9 @@ export class RedisService implements OnModuleDestroy {
   onModuleDestroy(): void {
     this.client.disconnect();
   }
+}
+
+/** Namespaced so a user id can never collide with a lock or a cache entry. */
+function revokedKey(userId: string): string {
+  return `auth:revoked:${userId}`;
 }
